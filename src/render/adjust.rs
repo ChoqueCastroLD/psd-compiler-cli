@@ -479,22 +479,18 @@ fn selective_color(r: &mut Reader) -> Option<ColorFn> {
         weights[7] = ((lo - 0.5) * 2.0).max(0.0);
         weights[9] = ((0.5 - hi) * 2.0).max(0.0);
         weights[8] = 1.0 - ((hi - 0.5).abs() + (lo - 0.5).abs());
-        let k = 1.0 - hi;
+        // Each range moves a channel by `((-1 - a) * k - a)` of its ink (relative) or of the
+        // whole range (absolute), within the channel's room (pkh.me's reverse engineering).
         let mut o = c;
         for ch in 0..3 {
-            let ink = 1.0 - c[ch];
+            let scale = if absolute { 1.0 } else { 1.0 - c[ch] };
             let mut delta = 0.0;
-            for (i, w) in weights.iter().enumerate() {
-                if *w <= 0.0 {
-                    continue;
+            for (w, a) in weights.iter().zip(&adj) {
+                if *w > 0.0 {
+                    delta += w * (((-1.0 - a[ch]) * a[3] - a[ch]) * scale).clamp(-c[ch], 1.0 - c[ch]);
                 }
-                let a = adj[i];
-                let scale = if absolute { 1.0 } else { ink };
-                let d_ink = (a[ch] * scale).clamp(-ink, 1.0 - ink);
-                let d_k = a[3] * if absolute { 1.0 } else { k };
-                delta += w * (d_ink + d_k * (1.0 - ink));
             }
-            o[ch] = (c[ch] - delta).clamp(0.0, 1.0);
+            o[ch] = (c[ch] + delta).clamp(0.0, 1.0);
         }
         o
     }))
@@ -694,6 +690,27 @@ mod tests {
         let t = threshold(&mut Reader::new(&[0, 128]), &ColorSpace::default()).unwrap();
         assert_eq!(t([0.6, 0.6, 0.6]), [1.0; 3]);
         assert_eq!(t([0.4, 0.4, 0.4]), [0.0; 3]);
+    }
+
+    #[test]
+    fn selective_color_moves_within_the_room() {
+        // Reds: +100% cyan, or +100% black alone.
+        let sel = |absolute: u16, cmyk: [i16; 4], c: [f32; 3]| {
+            let mut v = [0i16; 40];
+            v[4..8].copy_from_slice(&cmyk);
+            let mut data = [1u16, absolute].iter().flat_map(|x| x.to_be_bytes()).collect::<Vec<u8>>();
+            data.extend(v.iter().flat_map(|x| x.to_be_bytes()));
+            selective_color(&mut Reader::new(&data)).unwrap()(c)
+        };
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
+        // Relative cyan scales by the red's ink, so pure red has no room; absolute takes it all.
+        assert_eq!(sel(0, [100, 0, 0, 0], [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
+        assert_eq!(sel(1, [100, 0, 0, 0], [1.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        // A dull red belongs 0.6 to the reds.
+        assert!(close(sel(0, [100, 0, 0, 0], [0.8, 0.2, 0.2]), [0.68, 0.2, 0.2]));
+        assert!(close(sel(1, [100, 0, 0, 0], [0.8, 0.2, 0.2]), [0.32, 0.2, 0.2]));
+        // Black darkens every channel, each within its room.
+        assert!(close(sel(0, [0, 0, 0, 100], [0.8, 0.2, 0.2]), [0.68, 0.08, 0.08]));
     }
 
     #[test]

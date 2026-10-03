@@ -175,37 +175,24 @@ impl Gradient {
         }
     }
 
-    /// Channel `ch` of ramp `s` at `t`. Smooth ramps are cubic Hermite curves: end stops at 0 or
-    /// 1 lean half their segment's slope, end stops before a flat run are flat, and inner stops
-    /// take the slope between their neighbors; no curve leaves its segment's range.
+    /// Channel `ch` of ramp `s` at `t`. Smooth ramps are cubic Hermite curves through the stops,
+    /// Catmull-Rom over the stop index (unevenly spaced stops keep per-step tangents); no curve
+    /// leaves its segment's range.
     fn ramp<T>(&self, s: &[Stop<T>], t: f64, ch: impl Fn(&T) -> f32) -> f32 {
         let first = &s[0];
         if t <= first.at || s.len() == 1 {
             return ch(&first.value);
         }
         let v = |i: usize| ch(&s[i].value) as f64;
-        let slope = |i: usize| {
-            let span = s[i + 1].at - s[i].at;
-            if span > 0.0 {
-                (v(i + 1) - v(i)) / span
-            } else {
-                0.0
-            }
-        };
         let last = s.len() - 1;
         let tangent = |i: usize| -> f64 {
             if i == 0 {
-                return if s[0].at <= 1e-6 { 0.5 * slope(0) } else { 0.0 };
+                return 0.5 * (v(1) - v(0));
             }
             if i == last {
-                return if s[last].at >= 1.0 - 1e-6 { 0.5 * slope(last - 1) } else { 0.0 };
+                return 0.5 * (v(last) - v(last - 1));
             }
-            let span = s[i + 1].at - s[i - 1].at;
-            if span > 0.0 {
-                (v(i + 1) - v(i - 1)) / span
-            } else {
-                0.0
-            }
+            0.5 * (v(i + 1) - v(i - 1))
         };
         for i in 0..last {
             let (a, b) = (&s[i], &s[i + 1]);
@@ -223,9 +210,9 @@ impl Gradient {
                 }
                 let (u2, u3) = (u * u, u * u * u);
                 let hermite = (2.0 * u3 - 3.0 * u2 + 1.0) * va
-                    + (u3 - 2.0 * u2 + u) * tangent(i) * span
+                    + (u3 - 2.0 * u2 + u) * tangent(i)
                     + (3.0 * u2 - 2.0 * u3) * vb
-                    + (u3 - u2) * tangent(i + 1) * span;
+                    + (u3 - u2) * tangent(i + 1);
                 return (linear + (hermite - linear) * self.smooth).clamp(va.min(vb), va.max(vb)) as f32;
             }
         }
@@ -567,12 +554,15 @@ mod tests {
         let u: f64 = 0.25;
         let ss = u * u * (3.0 - 2.0 * u);
         assert!((g.sample(u)[0] as f64 - (u + ss) / 2.0).abs() < 1e-6);
-        // A peak and stops before flat runs are flat: a full smoothstep, never past the stops.
+        // Tangents run over the stop index: a peak is flat, an end leans half its step.
         let g = Gradient { colors: vec![stop(0.1, [0.0; 3]), stop(0.5, [1.0; 3]), stop(0.9, [0.0; 3])], ..g };
         let v = 0.1 + 0.4 * u;
-        assert!((g.sample(v)[0] as f64 - ss).abs() < 1e-6);
+        assert!((g.sample(v)[0] as f64 - (ss + 0.5 * u * (1.0 - u) * (1.0 - u))).abs() < 1e-6);
         assert_eq!(g.sample(0.05)[0], 0.0);
         assert_eq!(g.sample(0.5)[0], 1.0);
+        // Uneven spacing keeps the per-step tangent: same curve over a shorter span.
+        let g = Gradient { colors: vec![stop(0.0, [0.0; 3]), stop(0.2, [1.0; 3]), stop(1.0, [0.0; 3])], ..g };
+        assert!((g.sample(0.2 * u)[0] as f64 - (ss + 0.5 * u * (1.0 - u) * (1.0 - u))).abs() < 1e-6);
     }
 
     #[test]

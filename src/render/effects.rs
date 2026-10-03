@@ -570,6 +570,13 @@ impl Effects {
             let mut cov = soft(grown(g.spread), g.size, g.spread, 0.0);
             shape_glow(g, &mut cov);
             let tint = glow_tint(g, &mut cov);
+            // The glow never shows through a faded fill: once the layer covers it at `al * fill`,
+            // only the `1 - al` outside the shape remains (FillOpacitySample).
+            let f = fill.clamp(0.0, 1.0);
+            cov.iter_mut().zip(a).for_each(|(v, &al)| {
+                let d = 1.0 - al * f;
+                *v *= if d > 1e-6 { (1.0 - al) / d } else { 0.0 };
+            });
             p.below.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity, paint: Paint::Over });
         }
 

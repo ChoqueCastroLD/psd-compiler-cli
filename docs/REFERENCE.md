@@ -13,7 +13,7 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
-single color (115 of the 511, e.g. an adjustment over an empty canvas) count toward the total but not
+single color (118 of the 712, e.g. an adjustment over an empty canvas) count toward the total but not
 toward the feature rates, since they cannot show whether a feature renders right.
 
 Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
@@ -25,8 +25,10 @@ CI runs it on the test files of [psd-tools](https://github.com/psd-tools/psd-too
 [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd),
 [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd),
 [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk)
-[psd.js](https://github.com/meltingice/psd.js) and [Krita](https://invent.kde.org/graphics/krita) (its PSD import tests), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
-carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files. None of the
+[psd.js](https://github.com/meltingice/psd.js), [Krita](https://invent.kde.org/graphics/krita) (its PSD import tests) and
+[Aspose.PSD for .NET](https://github.com/aspose-psd/Aspose.PSD-for-.NET) (its example files), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
+carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files or the Aspose
+examples written back by Aspose (names with Changed, Added, Edited, Merged, Flattened or `_out`). None of the
 files are committed here.
 
 ## Results
@@ -38,7 +40,8 @@ files are committed here.
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
 | PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
 | Krita `plugins/impex/psd/tests/data` | 20 / 20 |
-| All | 502 / 511 (98.2%) |
+| Aspose.PSD `Examples/Data/PSD` | 188 / 201 (93.5%) |
+| All | 690 / 712 (96.9%) |
 
 ### Misses
 
@@ -51,6 +54,15 @@ files are committed here.
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
 | PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.07, 2.5% of pixels). |
+| Aspose `artboard2.psd` | Dissolve groups, as above. |
+| Aspose `StrokeNoise.psd` | A noise gradient, as above. |
+| Aspose `HasFont.psd`, `asposeImage02.psd`, `White 3D Text Effect.psd` | Fonts that are not installed (Stencil, Tw Cen MT). |
+| Aspose `CropTest.psd` | Its composite carries Aspose's evaluation watermark: Aspose wrote it. |
+| Aspose `ColorBalance.psd` | Its composite predates the last edit (it shows none of the layer's balance). |
+| Aspose `PhotoFilterAdjustmentLayer.psd` | A Photo Filter with a Lab color (88, −79, −118) far outside RGB; no conversion we tried explains Photoshop's result. |
+| Aspose `Mixer_ipad_Hand_W_crash.psd` | Color Balance with shadows, midtones and highlights set and luminosity preserved (mean 4.2): only midtones are calibrated. |
+| Aspose `ChannelMixerAdjustmentLayerCmyk.psd`, `CmykWithAlpha.psd`, `cub16bit_cmyk.psd` | CMYK documents: the channel mixer in CMYK, and alpha channels and 16-bit CMYK composites off by a few levels. |
+| Aspose `ImageWithTextLayer.psd` | Text antialiasing: mean 0.35, but 1.2% of pixels off by more than 16. |
 
 ## Calibrated models
 
@@ -58,7 +70,9 @@ Measured against the stored composites:
 
 - **Vector shapes** cover each pixel by the exact area inside the path (tiny-skia's anti-aliasing
   steps in quarters along near-horizontal edges, which Photoshop's does not).
-- **Gradients**: smooth stops use Hermite ramps between stops and honor midpoints. The
+- **Gradients**: smooth stops use Hermite ramps between stops and honor midpoints, with
+  Catmull-Rom tangents over the stop index (half the step at the ends), so unevenly spaced stops
+  keep per-step slopes. The
   interpolation method (`gs99` in gradient fills and overlays, the method tag of version 3 gradient
   maps) picks the space: "Classic" runs in encoded RGB, "Linear" in linear light, "Perceptual"
   in Oklab, "Smooth" in Oklab without the classic smoothness; Lab documents interpolate in Lab. A linear gradient spans the line through the box center as far
@@ -96,6 +110,12 @@ Measured against the stored composites:
 - **Vibrance**: both sliders scale chroma about the luminance (0.32, 0.62, 0.06) in gamma 2.4
   light, Saturation by `1 + s`, Vibrance by `1 + v · (1 − S) / 3` where S is the HSB saturation.
   Fit to the two Aspose.PSD files that hold a Vibrance layer alone; skin tones get no special case.
+- **Selective Color**: each range moves a channel by `((−1 − c) · k − c)` (c its cyan, magenta or
+  yellow slider, k its black) of the channel's ink (relative) or of the whole range (absolute),
+  kept within the channel's room, weighted by how much the pixel belongs to the range (after
+  [pkh.me's reverse engineering](https://blog.pkh.me/p/22-understanding-selective-coloring-in-adobe-photoshop.html)).
+- **Outer glows** never show through a faded fill: under the layer only the part outside the shape
+  remains, whatever the fill opacity (Aspose's FillOpacitySample).
 - **Color Lookup** CUBE tables name their loops outer to inner: `bgrOrder` runs red fastest,
   `rgbOrder` blue fastest.
 - **Patterns** shrunk below their size average the texels each pixel covers rather than sample one.

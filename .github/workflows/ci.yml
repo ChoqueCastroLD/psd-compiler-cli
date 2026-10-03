@@ -60,6 +60,7 @@ jobs:
       PSD_SDK_COMMIT: bfa117317e8bb15bfc9f76bad5800da603fddd1d
       PSD_JS_COMMIT: 7e8392d20fd5d66ad70ddda7309661b9a0ca67c8
       KRITA_COMMIT: 351297cdcec48aee3228f6c64a68d5d3b09e1796
+      ASPOSE_PSD_COMMIT: 1340b4d47babd4ba582ba7c629666aeedfdc03b4
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -101,6 +102,14 @@ jobs:
           git -C krita sparse-checkout set --no-cone /plugins/impex/psd/tests/data/
           git -C krita fetch -q --depth 1 --filter=blob:none origin "$KRITA_COMMIT"
           git -C krita checkout -q FETCH_HEAD
+          # Only Aspose.PSD's example files. Those its examples wrote back (Changed, Added, Edited,
+          # Merged, Flattened, _out) carry Aspose's composite, not Photoshop's.
+          git init -q aspose-psd
+          git -C aspose-psd remote add origin https://github.com/aspose-psd/Aspose.PSD-for-.NET.git
+          git -C aspose-psd sparse-checkout set --no-cone '/Examples/Data/PSD/*.psd' '/Examples/Data/PSD/*.psb'
+          git -C aspose-psd fetch -q --depth 1 --filter=blob:none origin "$ASPOSE_PSD_COMMIT"
+          git -C aspose-psd checkout -q FETCH_HEAD
+          find aspose-psd -iregex '.*\(changed\|added\|edited\|merged\|flattened\|_out\).*' -delete
       - run: cargo test --release --test reference -- --nocapture
         env:
-          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js:krita/plugins/impex/psd/tests/data
+          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js:krita/plugins/impex/psd/tests/data:aspose-psd/Examples/Data/PSD
