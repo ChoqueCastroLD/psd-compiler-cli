@@ -9,6 +9,7 @@ pub(crate) mod canvas;
 pub(crate) mod distance;
 pub(crate) mod effects;
 pub(crate) mod fill;
+mod filters;
 mod layer;
 mod lut;
 pub(crate) mod mask;

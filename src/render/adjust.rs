@@ -45,7 +45,7 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<Color
     f.ok_or("malformed adjustment")
 }
 
-fn lut_fn(luts: [Option<Vec<f32>>; 4]) -> ColorFn {
+pub(crate) fn lut_fn(luts: [Option<Vec<f32>>; 4]) -> ColorFn {
     let apply = |lut: &[f32], v: f32| {
         let x = v.clamp(0.0, 1.0) * (lut.len() - 1) as f32;
         let i = (x as usize).min(lut.len() - 2);
@@ -66,7 +66,7 @@ fn lut_fn(luts: [Option<Vec<f32>>; 4]) -> ColorFn {
     })
 }
 
-fn table(f: impl Fn(f64) -> f64) -> Vec<f32> {
+pub(crate) fn table(f: impl Fn(f64) -> f64) -> Vec<f32> {
     (0..1024).map(|i| f(i as f64 / 1023.0).clamp(0.0, 1.0) as f32).collect()
 }
 
@@ -181,10 +181,15 @@ fn brightness_contrast(l: &Layer) -> Option<ColorFn> {
             (r.i16().ok()? as f64, r.i16().ok()? as f64, true)
         }
     };
+    Some(brightness_contrast_fn(b, c, legacy))
+}
+
+/// Brightness and contrast in -150..=150 and -100..=100 (legacy: -100..=100 for both).
+pub(crate) fn brightness_contrast_fn(b: f64, c: f64, legacy: bool) -> ColorFn {
     if legacy {
         let k = if c >= 0.0 { 100.0 / (100.0 - c).max(0.5) } else { (100.0 + c) / 100.0 };
         let lut = table(|t| (t + b / 255.0 - 0.5) * k + 0.5);
-        return Some(lut_fn([Some(lut), None, None, None]));
+        return lut_fn([Some(lut), None, None, None]);
     }
     let bb = b / 150.0;
     let cc = c / 100.0;
@@ -220,7 +225,7 @@ fn brightness_contrast(l: &Layer) -> Option<ColorFn> {
             a.1 + (b.1 - a.1) * w
         }
     });
-    Some(lut_fn([Some(lut), None, None, None]))
+    lut_fn([Some(lut), None, None, None])
 }
 
 pub(crate) fn rgb_to_hsl(c: [f32; 3]) -> [f32; 3] {

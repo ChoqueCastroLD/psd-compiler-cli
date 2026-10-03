@@ -218,6 +218,18 @@ impl Layer {
     /// Smart object showing embedded file `id` on `quad` (corners clockwise from top left), with
     /// `cached` pixels covering the quad's bounds.
     pub fn smart(name: &str, id: &str, size: (f64, f64), quad: [(f64, f64); 4], cached: [u8; 4]) -> Layer {
+        Layer::smart_with(name, id, size, quad, cached, vec![])
+    }
+
+    /// A smart object whose placement descriptor also holds `extra` items.
+    pub fn smart_with(
+        name: &str,
+        id: &str,
+        size: (f64, f64),
+        quad: [(f64, f64); 4],
+        cached: [u8; 4],
+        extra: Vec<(&'static str, V)>,
+    ) -> Layer {
         let xs = quad.map(|p| p.0);
         let ys = quad.map(|p| p.1);
         let (l, t) =
@@ -225,15 +237,14 @@ impl Layer {
         let (r, b) =
             (xs.iter().cloned().fold(f64::MIN, f64::max) as i32, ys.iter().cloned().fold(f64::MIN, f64::max) as i32);
         let corners = V::List(quad.iter().flat_map(|p| [V::Num(p.0), V::Num(p.1)]).collect());
-        let desc = descriptor(
-            "null",
-            &[
-                ("Idnt", V::Text(id.into())),
-                ("Trnf", corners.clone()),
-                ("nonAffineTransform", corners),
-                ("Sz  ", V::Obj("Pnt ", vec![("Wdth", V::Num(size.0)), ("Hght", V::Num(size.1))])),
-            ],
-        );
+        let mut items = vec![
+            ("Idnt", V::Text(id.into())),
+            ("Trnf", corners.clone()),
+            ("nonAffineTransform", corners),
+            ("Sz  ", V::Obj("Pnt ", vec![("Wdth", V::Num(size.0)), ("Hght", V::Num(size.1))])),
+        ];
+        items.extend(extra);
+        let desc = descriptor("null", &items);
         let mut so = Buf(vec![]);
         so.raw(b"soLD");
         so.u32(4);

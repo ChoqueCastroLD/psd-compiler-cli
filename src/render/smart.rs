@@ -5,6 +5,7 @@ use std::io::Cursor;
 use rayon::prelude::*;
 
 use super::canvas::Raster;
+use super::filters::Stack;
 use super::{Ctx, RenderOptions};
 use crate::psd::descriptor::{Descriptor, Value};
 use crate::psd::Document;
@@ -206,13 +207,23 @@ pub(crate) fn render(ctx: &Ctx, l: &Layer, margin: usize, warnings: &mut Vec<Str
     if edited.is_none() && !ctx.options.render_smart_objects {
         return None;
     }
-    if placed.get("filterFX").is_some() {
-        if edited.is_none() {
-            warnings.push("smart filters are not supported; using the cached pixels".into());
-            return None;
+    let filters = placed.desc("filterFX").map(Stack::parse);
+    if let Some((_, unsupported)) = &filters {
+        if !unsupported.is_empty() {
+            let names = unsupported.join(", ");
+            // The cached pixels carry the whole stack; prefer them unless the contents changed.
+            if edited.is_none() {
+                warnings.push(format!("smart filter not supported ({names}); using the cached pixels"));
+                return None;
+            }
+            warnings.push(format!("smart filter not supported ({names}); skipped"));
         }
-        warnings.push("smart filters are not applied".into());
+        if l.block(b"FMsk").is_some() && placed.desc("filterFX").and_then(|f| f.bool("filterMaskEnable")) != Some(false)
+        {
+            warnings.push("smart filter masks are not supported; filters apply everywhere".into());
+        }
     }
+    let filters = filters.map(|f| f.0).filter(|f| !f.is_empty());
     let src = match edited {
         Some(d) => from_document(d, ctx, warnings),
         None => match doc.linked.get(id) {
@@ -240,13 +251,27 @@ pub(crate) fn render(ctx: &Ctx, l: &Layer, margin: usize, warnings: &mut Vec<Str
     let rect = env.as_ref().map_or(rect, Envelope::rect);
     let m = Projective::rect_to_quad(rect, quad)?;
     let inv = m.inverse()?;
-    let clip = [
-        -(margin as f64),
-        -(margin as f64),
-        (doc.width as usize + margin) as f64,
-        (doc.height as usize + margin) as f64,
-    ];
-    Some(draw(&Pyramid::new(src), rect, env.as_ref(), m, inv, clip))
+    let reach = filters.as_ref().map_or(0, Stack::reach);
+    let grow = (margin + reach) as f64;
+    let clip = [-grow, -grow, doc.width as f64 + grow, doc.height as f64 + grow];
+    let drawn = draw(&Pyramid::new(src), rect, env.as_ref(), m, inv, clip);
+    let Some(filters) = filters else { return Some(drawn) };
+    // Filters see the whole area they reach into, then the result is trimmed back.
+    let (w, h) = (doc.width as usize, doc.height as usize);
+    let (m, r) = (margin as i32, reach as i32);
+    let area = if filters.needs_canvas() {
+        (-m - r, -m - r, w as i32 + m + r, h as i32 + m + r)
+    } else {
+        (drawn.x - r, drawn.y - r, drawn.x + drawn.w as i32 + r, drawn.y + drawn.h as i32 + r)
+    };
+    let full = drawn.crop(area.0, area.1, (area.2 - area.0) as usize, (area.3 - area.1) as usize);
+    let out = filters.apply(full, (w, h));
+    let (x0, y0) = (out.x.max(-m), out.y.max(-m));
+    let (x1, y1) = ((out.x + out.w as i32).min(w as i32 + m), (out.y + out.h as i32).min(h as i32 + m));
+    if x1 <= x0 || y1 <= y0 {
+        return Some(Raster::new(0, 0, 0, 0));
+    }
+    Some(out.crop(x0, y0, (x1 - x0) as usize, (y1 - y0) as usize))
 }
 
 /// Draws the source, spanning `rect` before the warp `env` and map `m`, into the doc rectangle `clip`.
