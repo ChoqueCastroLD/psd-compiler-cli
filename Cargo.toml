@@ -1,0 +1,44 @@
+[package]
+name = "psd-compiler"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Compile Photoshop PSD/PSB files to PNG headlessly, re-rendering text layers with Photoshop fidelity."
+license = "MIT"
+repository = "https://github.com/ChoqueCastroLD/psd-compiler-cli"
+readme = "README.md"
+keywords = ["psd", "photoshop", "png", "renderer", "cli"]
+categories = ["command-line-utilities", "graphics", "multimedia::images"]
+exclude = ["docs/assets/*.psd"]
+
+[lib]
+name = "psd_compiler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "psdc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+mimalloc = { version = "0.1", default-features = false }
+rayon = "1"
+rustybuzz = "0.20"
+tiny-skia = "0.11"
+
+[dev-dependencies]
+png = "0.17"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+needless_range_loop = "allow"
+too_many_arguments = "allow"
