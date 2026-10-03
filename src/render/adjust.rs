@@ -213,39 +213,26 @@ pub(crate) fn brightness_contrast_fn(b: f64, c: f64, legacy: bool) -> ColorFn {
         let lut = table(|t| if c >= 0.0 { (t + b - 0.5) * k + 0.5 } else { (t - 0.5) * k + 0.5 + b });
         return lut_fn([Some(lut), None, None, None]);
     }
-    let bb = b / 150.0;
-    let cc = c / 100.0;
-    let xs = [0.0, 63.0 / 255.0, 191.0 / 255.0, 1.0];
-    let ys = [0.0, xs[1] - cc * 25.0 / 255.0, xs[2] + cc * 25.0 / 255.0, 1.0];
-    let pts: Vec<(f64, f64)> = xs.iter().copied().zip(ys).collect();
+    // Brightness flows `b` steps along a fixed field, then contrast bends a curve through
+    // (55, 55 - 0.27c) and (200, 200 + 0.27c): fit to brightnesscontrast_rgb and Photopea.
+    let flow =
+        |t: f64| t * (1.0 - t) * ((((0.0077174 * t - 0.0014366) * t + 0.0061142) * t + 0.008643) * t + 0.0060415);
+    let steps = (b.abs() / 2.0).ceil().max(1.0);
+    let h = b / steps;
+    let k = c * 0.27 / 255.0;
+    let xs = [0.0, 55.0 / 255.0, 200.0 / 255.0, 1.0];
+    let pts = [(xs[0], 0.0), (xs[1], xs[1] - k), (xs[2], xs[2] + k), (xs[3], 1.0)];
     let contrast = spline(&pts);
-    let pol = |a: f64, x: f64, r: f64| a * x.powf(r);
-    let bright = |t: f64| {
-        let ba = bb.abs();
-        let h = 0.5
-            * (ba * (pol(1.65, t, 0.35) + pol(-1.0, t, 10.0))
-                + (1.0 - ba) * (pol(1.96, t, 0.4) + pol(1.0, t, 4.0))
-                + pol(1.0, t, 1.25));
-        bb * t * (1.0 - t) * h
-    };
-    let n = 1024;
-    let rotated: Vec<(f64, f64)> = (0..n)
-        .map(|i| {
-            let t = i as f64 / (n - 1) as f64;
-            (t - bright(t), contrast(t) + bright(t))
-        })
-        .collect();
     let lut = table(|t| {
-        let i = rotated.partition_point(|p| p.0 < t);
-        if i == 0 {
-            rotated[0].1
-        } else if i >= n {
-            rotated[n - 1].1
-        } else {
-            let (a, b) = (rotated[i - 1], rotated[i]);
-            let w = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
-            a.1 + (b.1 - a.1) * w
+        let mut y = t;
+        for _ in 0..steps as usize {
+            let k1 = flow(y);
+            let k2 = flow(y + h * k1 / 2.0);
+            let k3 = flow(y + h * k2 / 2.0);
+            let k4 = flow(y + h * k3);
+            y = (y + h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0).clamp(0.0, 1.0);
         }
+        contrast(y)
     });
     lut_fn([Some(lut), None, None, None])
 }
@@ -652,6 +639,18 @@ fn black_white(data: &[u8], cs: &ColorSpace) -> Option<ColorFn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn brightness_runs_before_contrast() {
+        // Measured on brightnesscontrast_rgb: input and output levels out of 255.
+        let at = |b: f64, c: f64, v: f32| brightness_contrast_fn(b, c, false)([v / 255.0; 3])[0] * 255.0;
+        for (b, c, v, want) in [(150.0, -21.0, 48.0, 124.0), (23.0, 70.0, 144.0, 180.0), (-31.0, 47.0, 192.0, 171.0)] {
+            assert!((at(b, c, v) - want).abs() < 4.0, "{b} {c} {v}: {}", at(b, c, v));
+        }
+        // Contrast pivots on the middle gray, and brightness keeps black and white.
+        assert!((at(0.0, 80.0, 127.5) - 127.5).abs() < 0.5);
+        assert!(at(150.0, 0.0, 0.0) < 0.5 && at(-150.0, 0.0, 255.0) > 254.5);
+    }
+
     #[test]
     fn spline_passes_through_points() {
         let pts = [(0.0, 0.0), (0.25, 0.5), (1.0, 1.0)];
