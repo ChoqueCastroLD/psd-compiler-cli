@@ -24,8 +24,8 @@ the files are committed here.
 | Suite | Match |
 |---|---|
 | psd-tools `tests/psd_files` | 266 / 274 (97.1%) |
-| ag-psd `test` | 71 / 76 (93.4%) |
-| Both | 337 / 350 (96.3%) |
+| ag-psd `test` | 72 / 76 (94.7%) |
+| Both | 338 / 350 (96.6%) |
 
 ### Misses
 
@@ -39,7 +39,6 @@ the files are committed here.
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
 | ag-psd `read-write/strokes`, `multiple-strokes-test.psd` | Several strokes on one layer, and stroke edges at sharp corners. |
-| ag-psd `read/blend-mode` | Drop shadows with blend modes over a transparent document come out lighter than Photoshop's. |
 
 ## Calibrated models
 
@@ -58,7 +57,8 @@ Measured against the stored composites:
 - **Shape strokes** (vector stroke) are drawn above the layer's overlays and clipped layers, below
   its layer style strokes, keeping the shape's alpha.
 - **Shadows and glows**: Gaussian with sigma `0.45 · (size − spread)`, its taps closer than
-  `size − spread` (a size of 5 blurs over 4 pixels each way).
+  `size − spread` (a size of 5 blurs over 4 pixels each way). Offsets are whole pixels, halves
+  rounded away from zero (5 at 120° moves 3 across and 4 down).
 - **Bevels**: smooth bevels are lit from the blurred shape; Smooth Emboss and Pillow Emboss blur over
   half their size with 0.6 of the lift, and a pillow is lit per side of its fold. Chisel bevels
   (hard and soft) rise 0.35 of their depth, so their sides barely shade. A stroke emboss is an

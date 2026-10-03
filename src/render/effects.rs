@@ -406,9 +406,12 @@ fn shift(src: &[f32], w: usize, h: usize, dx: i32, dy: i32, outside: f32) -> Vec
     out
 }
 
+/// Offset of an effect in whole pixels. Halves round away from zero, also when the trigonometry
+/// lands a hair short of them (5 at 120° moves 3 across: ag-psd read/blend-mode).
 fn offset(angle: f64, distance: f64) -> (i32, i32) {
     let a = angle.to_radians();
-    ((-distance * a.cos()).round() as i32, (distance * a.sin()).round() as i32)
+    let round = |v: f64| ((v * 1e6).round() / 1e6).round() as i32;
+    (round(-distance * a.cos()), round(distance * a.sin()))
 }
 
 /// Mean over each pixel's cells of `f(inside, distance outward, distance inward)` in pixels.
@@ -1206,6 +1209,13 @@ mod tests {
         assert!(hi[5 * w + 15] > 0.2, "{}", hi[5 * w + 15]);
         assert_eq!(hi[2 * w + 15], 0.0);
         assert_eq!(hi[15 * w + 15], 0.0);
+    }
+
+    #[test]
+    fn offsets_round_halves_away_from_zero() {
+        assert_eq!(offset(120.0, 5.0), (3, 4));
+        assert_eq!(offset(-60.0, 5.0), (-3, -4));
+        assert_eq!(offset(-170.0, 30.0), (30, -5));
     }
 
     #[test]
