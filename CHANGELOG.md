@@ -17,6 +17,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - JPEG, WebP, TIFF and AVIF output (`-F`, `-Q`, `--background`).
 - Saving the edited document as PSD/PSB: `Document::to_psd`, `-o out.psd`.
 - Closest-style font substitution with synthetic bold/italic, `FontDb::alias` and `--font-map`.
+- Color lookup adjustments: CUBE, 3DL and LOOK tables, abstract and device-link ICC profiles.
+- Duotone documents shown in their inks, from Photoshop's preview table or the ink curves.
+- Smart objects linked to files outside the document, found next to it or at their absolute path; `Document::open` and `Document::set_base_dir`.
+- Smart filters on re-rendered smart objects: blurs, sharpening, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves and brightness/contrast, with their blending options.
+- Writing CMYK, Lab, duotone, indexed and 32-bit documents.
 
 ### Changed
 

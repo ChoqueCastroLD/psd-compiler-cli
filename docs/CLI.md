@@ -26,7 +26,7 @@ psdc [OPTIONS] <INPUT>...
 | `--font-map <FROM=TO>` | none | Draw font `FROM` (the PostScript name in the PSD) with font `TO`; repeatable. Fails if `TO` isn't found. |
 | `--no-system-fonts` | off | Skip the user and system font folders. Useful for reproducible builds. |
 | `--keep-text` | off | Don't re-render type layers. Use the pixels Photoshop cached instead. |
-| `--render-smart-objects` | off | Re-render smart objects from their embedded PSD/PSB, PNG or JPEG through the placement's perspective and warp. Smart objects edited with `--set-text` are always re-rendered. |
+| `--render-smart-objects` | off | Re-render smart objects from their embedded or linked PSD/PSB, PNG or JPEG through the placement's perspective and warp, then apply their smart filters. Linked files are looked up by relative path next to the input, then by absolute path. A smart object with a filter `psdc` can't apply, or whose file is missing, keeps its cached pixels. Smart objects edited with `--set-text` are always re-rendered. |
 | `--text-masks <DIR>` | none | Also write each type layer's coverage as a grayscale PNG, `DIR/STEM.textNNN.png`. `NNN` is the layer's index, bottom to top. |
 | `-c, --compression <0-9>` | `2` | PNG and TIFF deflate level. `0` is fastest; `9` gives the smallest files. On a 1284×1826 page, level 2 finishes about 2× faster end to end than level 9, with files about 7% larger. |
 | `-j, --jobs <N>` | all cores | Size of the worker thread pool. |
@@ -60,7 +60,7 @@ The first face found for a name wins. If a font is missing, the closest weight a
 
 - Images are 8-bit. PNG, WebP and TIFF are written as **RGB** when every pixel is opaque, and as **RGBA** otherwise; JPEG is flattened onto `--background`.
 - Colors are composited in the document's color space and converted to sRGB.
-- PSD output copies the input and replaces only what changed: edited type layers and smart objects get new type data and pixels, embedded files are rewritten, and the merged image is re-rendered. Without edits the copy is byte-identical. Supported for 8- and 16-bit RGB and grayscale documents. `psdc` refuses to overwrite the input.
+- PSD output copies the input and replaces only what changed: edited type layers and smart objects get new type data and pixels, embedded files are rewritten, and the merged image is re-rendered. Without edits the copy is byte-identical. Supported for RGB, grayscale, CMYK, Lab, duotone and indexed documents at their own depth (8 or 16 bits; RGB and grayscale also 32). CMYK goes through the document's ICC profile when it has one. `psdc` refuses to overwrite the input.
 
 ## Exit status
 

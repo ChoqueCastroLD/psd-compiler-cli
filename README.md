@@ -229,11 +229,11 @@ Here is why it is fast:
 
 | Area | Supported | Not yet |
 |---|---|---|
-| Files | PSD, PSB, 1/8/16/32-bit; writes edited PSD/PSB (8/16-bit RGB and grayscale) | Writing CMYK, Lab, indexed or 32-bit documents |
-| Color | RGB, grayscale, bitmap, CMYK, indexed, Lab, duotone (as grayscale), multichannel | Duotone ink curves |
+| Files | PSD, PSB, 1/8/16/32-bit; writes edited PSD/PSB in RGB, grayscale, CMYK, Lab, duotone and indexed (32-bit RGB and grayscale too) | Writing bitmap or multichannel documents |
+| Color | RGB, grayscale, bitmap, CMYK, indexed, Lab, duotone (Photoshop's ink preview, else the ink curves), multichannel | Duotone with color-book inks and no preview (shown as grayscale) |
 | Layers | Pixel, text, groups, pass-through, knockout, clipping, layer and vector masks, fill layers, opacity, fill | |
-| Adjustments | Levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold, black & white | Color lookup |
-| Smart objects | Cached pixels; re-rendered from embedded PSD/PSB, PNG or JPEG with perspective and warps; text edits inside | Smart filters (cached pixels used), linked files outside the document |
+| Adjustments | Levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold, black & white, color lookup (CUBE, 3DL, LOOK, abstract and device-link profiles) | |
+| Smart objects | Cached pixels; re-rendered from embedded or linked PSD/PSB, PNG or JPEG with perspective and warps; text edits inside; smart filters: Gaussian, box and motion blur, blur, blur more, sharpen, sharpen more, sharpen edges, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves, brightness/contrast | Other smart filters (cached pixels used), smart filter masks |
 | Blend modes | All 27, including Dissolve, Hue/Saturation/Color/Luminosity | |
 | Text | Point and paragraph text, runs, kerning, tracking, leading, scale, baseline shift, caps, faux styles, decorations, all justification modes, indents, spacing, vertical text, OpenType features, any size | |
 | Warps | All 15 presets, bend, horizontal/vertical distortion, custom and quilt meshes | |
@@ -270,9 +270,10 @@ Yes. With an output ending in `.psd`/`.psb` (or `-F psd`), `psdc` saves the docu
 
 ## Roadmap
 
-- [ ] Smart filters
-- [ ] Color lookup adjustments
-- [ ] Writing CMYK and 32-bit PSDs
+- [x] Smart filters (common blur, sharpen, other and color filters)
+- [x] Color lookup adjustments
+- [x] Writing CMYK, Lab, duotone, indexed and 32-bit PSDs
+- [ ] More smart filters (noise, distort, Camera Raw) and smart filter masks
 - [ ] WebAssembly build
 
 ## Contributing
