@@ -106,6 +106,11 @@ impl Gradient {
         let space = match method {
             Some("Lnr ") => Space::Linear,
             Some("Perc") => Space::Oklab,
+            // Smooth runs through Oklab without the classic smoothness: fit to effect-enums.
+            Some("Smoo") => {
+                self.smooth = 0.0;
+                Space::Oklab
+            }
             _ => return self,
         };
         if self.space == Space::Rgb {
@@ -526,6 +531,10 @@ mod tests {
         assert!((method("Lnr ") - 0.735).abs() < 0.002, "{}", method("Lnr "));
         // Oklab: half the lightness, an eighth of the light.
         assert!((method("Perc") - 0.389).abs() < 0.002, "{}", method("Perc"));
+        // Smooth: Oklab without the classic smoothness (effect-enums' reflected stroke).
+        let smooth = Gradient { smooth: 1.0, ..bw() }.method(Some("Smoo"));
+        assert_eq!(smooth.smooth, 0.0);
+        assert!((smooth.sample(0.5)[0] - 0.389).abs() < 0.002);
     }
 
     #[test]

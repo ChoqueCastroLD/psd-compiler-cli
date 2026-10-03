@@ -22,8 +22,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - Smart objects linked to files outside the document, found next to it or at their absolute path; `Document::open` and `Document::set_base_dir`.
 - Smart filters on re-rendered smart objects: blurs, sharpening, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves and brightness/contrast, with their blending options.
 - Writing CMYK, Lab, duotone, indexed and 32-bit documents.
-- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the psd-tools and ag-psd test files (335/350 match; see docs/REFERENCE.md).
-- Gradient interpolation methods: Linear (linear light) and Perceptual (Oklab), in gradient fills, overlays, strokes and gradient maps.
+- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the psd-tools and ag-psd test files (336/350 match; see docs/REFERENCE.md).
+- Stroke emboss bevels.
+- Gradient interpolation methods: Linear (linear light), Perceptual (Oklab) and Smooth, in gradient fills, overlays, strokes and gradient maps.
 - Effect contours, glow range and jitter, Blend If, channel restrictions, "Blend Interior Effects as Group", layer style pattern origin (`fxrp`), CMYK plates and 32-bit linear compositing.
 
 ### Changed
@@ -43,8 +44,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - Strokes measure from pixel centers; their inner band replaces the layer's pixels; outside strokes knock out drop shadows the layer conceals; stroke gradients span the stroke's outer edge.
   - A shape's vector stroke is drawn above its overlays and clipped layers, below its layer style strokes.
   - Effects in Color/Linear Dodge, Burn, Difference and Vivid/Linear Light fade toward the mode's neutral color instead of losing alpha (fill opacity too).
-  - Smooth bevels are lit from the blurred shape; smooth emboss and pillow emboss blur over half their size, and a pillow is lit per side of its fold.
-  - Pass-through groups with fill opacity are isolated; 16-bit posterize uses 16-bit levels.
+  - Smooth bevels are lit from the blurred shape; smooth emboss and pillow emboss blur over half their size, and a pillow is lit per side of its fold; chisel bevels rise 0.35 of their depth.
+  - Pass-through groups with fill opacity mix what passes through with what they show apart, by the fill; 16-bit posterize uses 16-bit levels.
 - 16-bit Lab a/b channels are read and written at 256 per unit around 32768.
 
 ## [0.1.0] - 2026-10-03

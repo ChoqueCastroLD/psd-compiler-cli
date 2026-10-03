@@ -81,6 +81,8 @@ pub(crate) enum BevelStyle {
     Outer,
     Emboss,
     Pillow,
+    /// An inner bevel of the layer and its stroke, painted only on the stroke.
+    Stroke,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -362,6 +364,7 @@ pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects
                 Some("OtrB") => BevelStyle::Outer,
                 Some("Embs") => BevelStyle::Emboss,
                 Some("PlEb") => BevelStyle::Pillow,
+                Some("strokeEmboss") => BevelStyle::Stroke,
                 _ => BevelStyle::Inner,
             },
             smooth: !matches!(d.enumerated("bvlT"), Some("PrBL") | Some("Slmt")),
@@ -646,8 +649,11 @@ impl Effects {
             .then(|| soft_distance(|i| (src[i] > 0.0).then(|| 0.5 + edge[i]), w, h, reach));
         let inward = need(|p| *p != StrokePosition::Outside)
             .then(|| soft_distance(|i| (src[i] < 1.0).then(|| 0.5 - edge[i]), w, h, reach));
+        // The first stroke's coverage on the layer and beside it, for stroke embosses.
+        let mut embossed: Option<(Vec<f32>, Vec<f32>)> = None;
         for s in &self.strokes {
             let r = s.size as f32;
+            let mut covs = (vec![0.0; w * h], vec![0.0; w * h]);
             let (inner_r, outer_r) = match s.position {
                 StrokePosition::Outside => (0.0, r),
                 StrokePosition::Inside => (r, 0.0),
@@ -673,7 +679,8 @@ impl Effects {
                         paint: Paint::Over,
                     });
                 }
-                let cov = band.iter().zip(a).map(|(&c, &q)| if q > 1e-6 { c } else { 0.0 }).collect();
+                let cov: Vec<f32> = band.iter().zip(a).map(|(&c, &q)| if q > 1e-6 { c } else { 0.0 }).collect();
+                covs.0.clone_from(&cov);
                 p.inner.push(Layered {
                     cov,
                     tint: tint.clone(),
@@ -683,9 +690,11 @@ impl Effects {
                 });
             }
             if outer_r > 0.0 {
-                let cov = band(&outward, outer_r).iter().zip(src).map(|(&c, &q)| c * (1.0 - q)).collect();
+                let cov: Vec<f32> = band(&outward, outer_r).iter().zip(src).map(|(&c, &q)| c * (1.0 - q)).collect();
+                covs.1.clone_from(&cov);
                 p.beside.push(Layered { cov, tint, mode: s.mode, opacity: s.opacity, paint: Paint::Over });
             }
+            embossed.get_or_insert(covs);
         }
         if !knocked.is_empty() && !p.beside.is_empty() {
             // Strokes beside the layer knock out its shadows too.
@@ -700,12 +709,37 @@ impl Effects {
             }
         }
         for b in &self.bevels {
+            let (hc, ho, hm) = b.highlight;
+            let (sc, so, sm) = b.shadow;
+            if b.style == BevelStyle::Stroke {
+                // Without a stroke there is nothing to emboss.
+                let Some((on, beside)) = &embossed else { continue };
+                let shape: Vec<f32> = a.iter().zip(beside).map(|(&q, &o)| (q + o).min(1.0)).collect();
+                let d = distances(&shape, w, h, true, b.size + 1.0);
+                let (hi, lo) = bevel_light(b, &d, &shape, w, h);
+                for (layer, part) in [(&mut p.inner, on), (&mut p.beside, beside)] {
+                    let masked = |v: &[f32]| v.iter().zip(part).map(|(&s, &c)| s * c).collect::<Vec<f32>>();
+                    layer.push(Layered {
+                        cov: masked(&lo),
+                        tint: Tint::Solid(sc),
+                        mode: sm,
+                        opacity: so,
+                        paint: Paint::Over,
+                    });
+                    layer.push(Layered {
+                        cov: masked(&hi),
+                        tint: Tint::Solid(hc),
+                        mode: hm,
+                        opacity: ho,
+                        paint: Paint::Over,
+                    });
+                }
+                continue;
+            }
             let d = dist.as_ref().expect("bevels need distances");
             let (hi, lo) = bevel_light(b, d, a, w, h);
             let inner = |v: &[f32]| v.iter().zip(a).map(|(&s, &r)| if r > 0.0 { s } else { 0.0 }).collect::<Vec<f32>>();
             let outer = |v: &[f32]| v.iter().zip(a).map(|(&s, &r)| s * (1.0 - r)).collect::<Vec<f32>>();
-            let (hc, ho, hm) = b.highlight;
-            let (sc, so, sm) = b.shadow;
             if b.style != BevelStyle::Outer {
                 p.inner.push(Layered {
                     cov: inner(&lo),
@@ -784,7 +818,9 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
         g
     } else {
         match b.style {
-            BevelStyle::Inner => field(d, w, h, |inside, _, din| if inside { ramp(din / size) } else { 0.0 }),
+            BevelStyle::Inner | BevelStyle::Stroke => {
+                field(d, w, h, |inside, _, din| if inside { ramp(din / size) } else { 0.0 })
+            }
             BevelStyle::Outer => field(d, w, h, |inside, dout, _| if inside { 1.0 } else { ramp(1.0 - dout / size) }),
             BevelStyle::Emboss => field(d, w, h, |inside, dout, din| {
                 let s = if inside { din } else { -dout };
@@ -805,6 +841,8 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
     let lift = (b.depth * size as f64).max(0.01) as f32 * if b.up { 1.0 } else { -1.0 };
     // A smooth emboss or pillow rises 0.6 of its depth (a pillow on either side of the fold).
     let lift = if b.smooth && halves { lift * 0.6 } else { lift };
+    // Chisels rise 0.35 of their depth: fit to Photoshop's outer bevels and pillows.
+    let lift = if b.smooth { lift } else { lift * 0.35 };
     let (th, alt) = (b.angle.to_radians(), b.altitude.to_radians());
     let light = [(th.cos() * alt.cos()) as f32, (-th.sin() * alt.cos()) as f32, alt.sin() as f32];
     let flat = light[2];
@@ -1106,6 +1144,67 @@ mod tests {
         let (lo, hi) = (&p.inner[0].cov, &p.inner[1].cov);
         assert!(hi[15 * w + 6] > 0.3 && lo[15 * w + 6] == 0.0);
         assert!(lo[15 * w + 23] > 0.3 && hi[15 * w + 23] == 0.0);
+        assert_eq!(hi[15 * w + 15], 0.0);
+    }
+
+    #[test]
+    fn chisel_outer_bevels_rise_gently() {
+        let (w, h) = (30, 30);
+        let a = square(w, h, 5, 25);
+        let b = Bevel {
+            style: BevelStyle::Outer,
+            smooth: false,
+            depth: 1.0,
+            up: true,
+            size: 5.0,
+            soften: 0.0,
+            angle: 90.0,
+            altitude: 30.0,
+            highlight: ([1.0; 3], 1.0, BlendMode::Screen),
+            shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+        };
+        let e = Effects { bevels: vec![b], ..Default::default() };
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
+        let lo = &p.beside[0].cov;
+        // Photoshop's chisels slope at 0.35 of their depth: sides barely shade (effect-enums).
+        assert!(lo[15 * w + 2] > 0.02 && lo[15 * w + 2] < 0.1, "{}", lo[15 * w + 2]);
+        assert!(lo[27 * w + 15] > 0.5 && lo[27 * w + 15] < 0.75, "{}", lo[27 * w + 15]);
+        assert!(p.inner.is_empty());
+    }
+
+    #[test]
+    fn stroke_embosses_light_only_the_stroke() {
+        let (w, h) = (30, 30);
+        let a = square(w, h, 8, 22);
+        let b = Bevel {
+            style: BevelStyle::Stroke,
+            smooth: true,
+            depth: 1.0,
+            up: true,
+            size: 4.0,
+            soften: 0.0,
+            angle: 90.0,
+            altitude: 30.0,
+            highlight: ([1.0; 3], 1.0, BlendMode::Screen),
+            shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+        };
+        let stroke = Stroke {
+            fill: Fill::Solid([0.0; 3]),
+            opacity: 1.0,
+            mode: BlendMode::Normal,
+            size: 4.0,
+            position: StrokePosition::Outside,
+        };
+        let prepare =
+            |e: &Effects| e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
+        // No stroke, no emboss.
+        assert!(prepare(&Effects { bevels: vec![b.clone()], ..Default::default() }).beside.is_empty());
+        let p = prepare(&Effects { bevels: vec![b], strokes: vec![stroke], ..Default::default() });
+        // The stroke, then its shadow and highlight; lit on top, nothing past the stroke.
+        assert_eq!(p.beside.len(), 3);
+        let hi = &p.beside[2].cov;
+        assert!(hi[5 * w + 15] > 0.2, "{}", hi[5 * w + 15]);
+        assert_eq!(hi[2 * w + 15], 0.0);
         assert_eq!(hi[15 * w + 15], 0.0);
     }
 
