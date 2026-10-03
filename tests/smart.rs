@@ -77,3 +77,36 @@ fn text_inside_a_smart_object_can_be_replaced() {
     let ink = (0..100).filter(|&x| out.image.pixel(x, 30)[0] < 128).count();
     assert!(ink > 40, "only {ink} dark pixels across the new text");
 }
+
+#[test]
+fn linked_files_are_found_next_to_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("assets");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("logo.png"), png(4, 4, [0, 0, 255, 255])).unwrap();
+    let mut psd = white(40, 40).layer(Layer::smart(
+        "so",
+        ID,
+        (4.0, 4.0),
+        [(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)],
+        [255, 0, 0, 255],
+    ));
+    psd.external.push((ID.into(), "assets/logo.png".into(), "file:///Macintosh%20HD/nowhere/logo.png".into()));
+    let path = dir.path().join("page.psd");
+    std::fs::write(&path, psd.build()).unwrap();
+
+    let doc = Document::open(&path).unwrap();
+    let out = render(&doc, &psd_compiler::FontDb::new(), &rerender());
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(out.image.pixel(20, 20), [0, 0, 255, 255]);
+
+    // Without the folder the link can't be followed, so the cached pixels stay.
+    let doc = Document::parse(&psd.build()).unwrap();
+    let out = render(&doc, &psd_compiler::FontDb::new(), &rerender());
+    assert_eq!(out.image.pixel(20, 20), [255, 0, 0, 255]);
+    assert!(
+        out.warnings.iter().any(|w| w.message.contains("linked file \"assets/logo.png\" not found")),
+        "{:?}",
+        out.warnings
+    );
+}

@@ -62,7 +62,7 @@ struct Cli {
     #[arg(long)]
     keep_text: bool,
 
-    /// Re-render smart objects from their embedded PSD, PNG or JPEG instead of the cached pixels.
+    /// Re-render smart objects from their embedded or linked PSD, PNG or JPEG instead of the cached pixels. Linked files are looked up by relative path next to the input, then by absolute path.
     /// Smart objects edited with --set-text are always re-rendered.
     #[arg(long)]
     render_smart_objects: bool,
@@ -246,6 +246,7 @@ fn compile(cli: &Cli, fonts: &FontDb, input: &Path) -> Result<()> {
     let start = Instant::now();
     let original = std::fs::read(input).with_context(|| format!("cannot read {}", input.display()))?;
     let mut doc = Document::parse(&original).with_context(|| format!("cannot read {}", input.display()))?;
+    doc.set_base_dir(input.parent().unwrap_or(Path::new(".")));
     if cli.list_text {
         list_text(&doc, input);
         return Ok(());

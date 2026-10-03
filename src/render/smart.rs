@@ -216,11 +216,14 @@ pub(crate) fn render(ctx: &Ctx, l: &Layer, margin: usize, warnings: &mut Vec<Str
     let src = match edited {
         Some(d) => from_document(d, ctx, warnings),
         None => match doc.linked.get(id) {
-            Some(data) => decode(data, ctx, warnings),
-            None => {
-                warnings.push("smart object file is not embedded; using the cached pixels".into());
-                return None;
-            }
+            Some(data) => decode(data, doc.base_dir.clone(), ctx, warnings),
+            None => match doc.read_external(id) {
+                Ok((data, dir)) => decode(&data, Some(dir), ctx, warnings),
+                Err(e) => {
+                    warnings.push(format!("{e}; using the cached pixels"));
+                    return None;
+                }
+            },
         },
     }?;
     if src.w == 0 || src.h == 0 {
@@ -399,11 +402,17 @@ fn from_document(d: &Document, ctx: &Ctx, warnings: &mut Vec<String>) -> Option<
     Some(Source::from_rgba8(out.image.width as usize, out.image.height as usize, &out.image.data))
 }
 
-/// Decodes an embedded PSD, PSB, PNG or JPEG file.
-fn decode(data: &[u8], ctx: &Ctx, warnings: &mut Vec<String>) -> Option<Source> {
+/// Decodes an embedded or linked PSD, PSB, PNG or JPEG file; a linked PSD resolves its own links
+/// against `dir`.
+fn decode(data: &[u8], dir: Option<std::path::PathBuf>, ctx: &Ctx, warnings: &mut Vec<String>) -> Option<Source> {
     let result = if data.starts_with(b"8BPS") {
         match Document::parse(data) {
-            Ok(d) => return from_document(&d, ctx, warnings),
+            Ok(mut d) => {
+                if let Some(dir) = dir {
+                    d.set_base_dir(dir);
+                }
+                return from_document(&d, ctx, warnings);
+            }
             Err(e) => Err(e.to_string()),
         }
     } else if data.starts_with(b"\x89PNG") {

@@ -7,7 +7,7 @@ pub(crate) mod reader;
 pub(crate) mod write;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use channel::{decode_channel, decode_packbits, to_8bit, Compression};
 use descriptor::Descriptor;
@@ -197,6 +197,10 @@ pub struct Document {
     pub(crate) composite: Vec<Vec<u8>>,
     pub(crate) patterns: HashMap<String, Pattern>,
     pub(crate) linked: HashMap<String, Vec<u8>>,
+    /// Smart object files stored outside the document, by unique id.
+    pub(crate) external: HashMap<String, ExternalFile>,
+    /// Folder that relative links resolve against.
+    pub(crate) base_dir: Option<PathBuf>,
     /// Embedded documents edited through [`Document::set_text`], by smart object id.
     pub(crate) edited: HashMap<String, Document>,
     pub(crate) icc_profile: Option<Vec<u8>>,
@@ -618,7 +622,64 @@ fn read_pattern(r: &mut Reader) -> Result<(String, Pattern)> {
 }
 
 /// Reads the embedded files of a `lnk2`/`lnkD`/`lnk3` block into `out`, keyed by unique id.
-fn read_linked(data: &[u8], out: &mut HashMap<String, Vec<u8>>) {
+/// A smart object file stored outside the document (`liFE`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExternalFile {
+    pub name: String,
+    /// Where to look, best first: the relative path, then the absolute paths as file URLs.
+    pub relative: Option<String>,
+    pub absolute: Vec<String>,
+}
+
+impl ExternalFile {
+    /// Paths to try, relative ones resolved against `base`.
+    fn candidates(&self, base: Option<&Path>) -> Vec<PathBuf> {
+        let mut out = vec![];
+        if let Some(base) = base {
+            out.extend(self.relative.iter().map(|r| base.join(r)));
+            if !self.name.is_empty() {
+                out.push(base.join(&self.name));
+            }
+        }
+        for url in &self.absolute {
+            let path = url.strip_prefix("file://").unwrap_or(url);
+            let path = percent_decode(path);
+            // Windows: file:///C:/dir/file.
+            let path = match path.as_bytes() {
+                [b'/', d, b':', ..] if d.is_ascii_alphabetic() => path[1..].to_string(),
+                _ => path,
+            };
+            out.push(PathBuf::from(&path));
+            // macOS URLs start with the volume name: file:///Macintosh HD/Users/...
+            if let Some(rest) = path.strip_prefix('/').and_then(|p| p.find('/').map(|i| &p[i..])) {
+                out.push(PathBuf::from(rest));
+            }
+        }
+        out
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn read_linked(data: &[u8], out: &mut HashMap<String, Vec<u8>>, external: &mut HashMap<String, ExternalFile>) {
     let mut r = Reader::new(data);
     while r.remaining() >= 8 {
         let Ok(len) = r.u64() else { break };
@@ -627,10 +688,10 @@ fn read_linked(data: &[u8], out: &mut HashMap<String, Vec<u8>>) {
         let mut e = Reader::at(&data[..(start + len as usize).min(data.len())], start, false);
         let mut entry = || -> Result<()> {
             let kind = e.tag()?;
-            let _version = e.u32()?;
+            let version = e.u32()?;
             let id_len = e.u8()? as usize;
             let id = String::from_utf8_lossy(e.bytes(id_len)?).into_owned();
-            let _file_name = e.unicode()?;
+            let file_name = e.unicode()?;
             let _file_type = e.tag()?;
             let _creator = e.tag()?;
             let size = e.u64()? as usize;
@@ -638,8 +699,33 @@ fn read_linked(data: &[u8], out: &mut HashMap<String, Vec<u8>>) {
                 e.u32()?;
                 descriptor::read(&mut e)?;
             }
-            if &kind == b"liFD" {
-                out.insert(id, e.bytes(size)?.to_vec());
+            match &kind {
+                b"liFD" => {
+                    out.insert(id, e.bytes(size)?.to_vec());
+                }
+                b"liFE" => {
+                    e.u32()?;
+                    let link = descriptor::read(&mut e)?;
+                    let text =
+                        |k: &str| link.text(k).map(|t| t.trim_end_matches('\0').to_string()).filter(|t| !t.is_empty());
+                    let file = ExternalFile {
+                        name: text("Nm  ").unwrap_or_else(|| file_name.trim_end_matches('\0').to_string()),
+                        relative: text("relPath"),
+                        absolute: ["fullPath", "originalPath"].into_iter().filter_map(text).collect(),
+                    };
+                    if version > 3 {
+                        // Modification date: year, month, day, hour, minute, seconds.
+                        e.skip(16)?;
+                    }
+                    let file_size = e.u64()? as usize;
+                    if version == 2 {
+                        // Old files keep a copy of the linked file.
+                        out.insert(id, e.bytes(file_size)?.to_vec());
+                    } else {
+                        external.insert(id, file);
+                    }
+                }
+                _ => {}
             }
             Ok(())
         };
@@ -669,6 +755,8 @@ impl Document {
             composite: vec![],
             patterns: HashMap::new(),
             linked: HashMap::new(),
+            external: HashMap::new(),
+            base_dir: None,
             edited: HashMap::new(),
             icc_profile: None,
         }
@@ -703,7 +791,11 @@ impl Document {
                 let mut doc = match self.edited.remove(&id) {
                     Some(d) => d,
                     None => match self.linked.get(&id) {
-                        Some(data) if data.starts_with(b"8BPS") => Document::parse(data)?,
+                        Some(data) if data.starts_with(b"8BPS") => {
+                            let mut d = Document::parse(data)?;
+                            d.base_dir.clone_from(&self.base_dir);
+                            d
+                        }
                         _ => continue,
                     },
                 };
@@ -742,8 +834,31 @@ impl Document {
     }
 
     /// Reads and parses a PSD or PSB file.
+    ///
+    /// Smart objects linked to files outside the document are looked up next to `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Document> {
-        Document::parse(&std::fs::read(path)?)
+        let path = path.as_ref();
+        let mut doc = Document::parse(&std::fs::read(path)?)?;
+        doc.set_base_dir(path.parent().unwrap_or(Path::new(".")));
+        Ok(doc)
+    }
+
+    /// Sets the folder that the relative paths of linked smart objects resolve against (the
+    /// document's folder; [`Document::open`] sets it). Without it only absolute paths are tried.
+    pub fn set_base_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.base_dir = Some(dir.into());
+    }
+
+    /// Reads the linked file of smart object `id`, with the folder it was found in.
+    pub(crate) fn read_external(&self, id: &str) -> std::result::Result<(Vec<u8>, PathBuf), String> {
+        let Some(file) = self.external.get(id) else { return Err("smart object file is not embedded".into()) };
+        for path in file.candidates(self.base_dir.as_deref()) {
+            if let Ok(data) = std::fs::read(&path) {
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+                return Ok((data, dir));
+            }
+        }
+        Err(format!("linked file {:?} not found", file.name))
     }
 
     /// Parses a PSD or PSB file held in memory.
@@ -822,6 +937,7 @@ impl Document {
         let mut layers = vec![];
         let mut patterns = HashMap::new();
         let mut linked = HashMap::new();
+        let mut external = HashMap::new();
         if layer_mask_len > 0 {
             let info_len = r.length()?;
             let info_end = r.pos + info_len;
@@ -842,8 +958,8 @@ impl Document {
             for key in [b"Patt", b"Pat2", b"Pat3"] {
                 globals.all(*key).for_each(|b| read_patterns(b, &mut patterns));
             }
-            for key in [b"lnk2", b"lnkD", b"lnk3"] {
-                globals.all(*key).for_each(|b| read_linked(b, &mut linked));
+            for key in [b"lnk2", b"lnkD", b"lnk3", b"lnkE"] {
+                globals.all(*key).for_each(|b| read_linked(b, &mut linked, &mut external));
             }
         }
         r.pos = layer_mask_end;
@@ -870,8 +986,33 @@ impl Document {
             composite,
             patterns,
             linked,
+            external,
+            base_dir: None,
             edited: HashMap::new(),
             icc_profile,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linked_file_candidates() {
+        let f = ExternalFile {
+            name: "a b.png".into(),
+            relative: Some("img/a b.png".into()),
+            absolute: vec!["file:///Macintosh%20HD/Users/me/a%20b.png".into(), "file:///C:/art/a%20b.png".into()],
+        };
+        let base = Path::new("/work");
+        let want: Vec<PathBuf> = vec![
+            base.join("img/a b.png"),
+            base.join("a b.png"),
+            "/Macintosh HD/Users/me/a b.png".into(),
+            "/Users/me/a b.png".into(),
+            "C:/art/a b.png".into(),
+        ];
+        assert_eq!(f.candidates(Some(base)), want);
     }
 }

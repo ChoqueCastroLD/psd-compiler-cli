@@ -638,11 +638,23 @@ pub struct Psd {
     pub global_angle: Option<i32>,
     /// Embedded smart object files: unique id and contents.
     pub linked: Vec<(String, Vec<u8>)>,
+    /// Linked smart object files: unique id, relative path and absolute file URL.
+    pub external: Vec<(String, String, String)>,
 }
 
 impl Psd {
     pub fn new(width: u32, height: u32) -> Psd {
-        Psd { width, height, psb: false, depth: 8, layers: vec![], composite: None, global_angle: None, linked: vec![] }
+        Psd {
+            width,
+            height,
+            psb: false,
+            depth: 8,
+            layers: vec![],
+            composite: None,
+            global_angle: None,
+            linked: vec![],
+            external: vec![],
+        }
     }
 
     /// Adds a layer above the previous ones.
@@ -826,6 +838,46 @@ impl Psd {
             }
             lm.raw(b"8BIM");
             lm.raw(b"lnk2");
+            lm.len(self.psb, lnk.0.len());
+            lm.raw(&lnk.0);
+        }
+        if !self.external.is_empty() {
+            let mut lnk = Buf(vec![]);
+            for (id, rel, url) in &self.external {
+                let mut e = Buf(vec![]);
+                e.raw(b"liFE");
+                e.u32(7);
+                e.u8(id.len() as u8);
+                e.raw(id.as_bytes());
+                e.unicode(rel);
+                e.raw(b"png ");
+                e.raw(b"8BIM");
+                e.u64(0);
+                e.u8(0);
+                e.u32(16);
+                e.descriptor(
+                    "ExternalFileLink",
+                    &[
+                        ("Nm  ", V::Text(rel.clone())),
+                        ("fullPath", V::Text(url.clone())),
+                        ("relPath", V::Text(rel.clone())),
+                    ],
+                );
+                e.i32(2026);
+                e.raw(&[1, 1, 0, 0]);
+                e.f64(0.0);
+                e.u64(0);
+                e.unicode("");
+                e.f64(0.0);
+                e.u8(0);
+                lnk.u64(e.0.len() as u64);
+                lnk.raw(&e.0);
+                while lnk.0.len() % 4 != 0 {
+                    lnk.u8(0);
+                }
+            }
+            lm.raw(b"8BIM");
+            lm.raw(b"lnkE");
             lm.len(self.psb, lnk.0.len());
             lm.raw(&lnk.0);
         }
