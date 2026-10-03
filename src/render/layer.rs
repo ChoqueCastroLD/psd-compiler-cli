@@ -160,20 +160,7 @@ fn shape_raster(doc: &Document, cs: &ColorSpace, l: &Layer, bake: bool) -> Optio
         return None;
     }
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    // Aligned gradients and patterns span the visible area: the vector path, else a raster mask
-    // that hides everything outside it, else the layer.
-    let rect_box = |r: &crate::psd::Rect| [r.left as f64, r.top as f64, r.right as f64, r.bottom as f64];
-    let mask_box = l
-        .mask
-        .as_ref()
-        .filter(|m| !m.disabled && m.default == 0 && m.rect.width() > 0 && m.rect.height() > 0)
-        .map(|m| rect_box(&m.rect));
-    let bounds =
-        vm.as_ref().filter(|m| !m.invert).and_then(|m| m.bounds()).or(mask_box).unwrap_or(if l.bounds.width() > 0 {
-            rect_box(&l.bounds)
-        } else {
-            [0.0, 0.0, doc.width as f64, doc.height as f64]
-        });
+    let bounds = paint_bounds(doc, l, vm.as_ref());
     let fill_on = stroke.as_ref().is_none_or(|s| s.fill_enabled);
     let cov = match (&vm, fill_on) {
         (_, false) => Some(vec![0.0; w * h]),
@@ -188,6 +175,42 @@ fn shape_raster(doc: &Document, cs: &ColorSpace, l: &Layer, bake: bool) -> Optio
         r.paint(&sr, crate::blend::BlendMode::Normal, s.opacity, None);
     }
     Some(r)
+}
+
+/// The box aligned gradients and patterns of shape layer `l` span: the vector path, else a raster
+/// mask that hides everything outside it, else the layer.
+fn paint_bounds(doc: &Document, l: &Layer, vm: Option<&vector::VectorMask>) -> [f64; 4] {
+    let rect_box = |r: &crate::psd::Rect| [r.left as f64, r.top as f64, r.right as f64, r.bottom as f64];
+    let mask_box = l
+        .mask
+        .as_ref()
+        .filter(|m| !m.disabled && m.default == 0 && m.rect.width() > 0 && m.rect.height() > 0)
+        .map(|m| rect_box(&m.rect));
+    vm.filter(|m| !m.invert).and_then(|m| m.bounds()).or(mask_box).unwrap_or(if l.bounds.width() > 0 {
+        rect_box(&l.bounds)
+    } else {
+        [0.0, 0.0, doc.width as f64, doc.height as f64]
+    })
+}
+
+/// The vector stroke of shape layer `l` over `rect`: its paint, and its opacity. Photoshop draws it
+/// as an effect, above the layer's clipped layers.
+pub(crate) fn shape_stroke(
+    doc: &Document,
+    cs: &ColorSpace,
+    l: &Layer,
+    (x, y, w, h): (i32, i32, usize, usize),
+) -> Option<(Raster, f32)> {
+    let s = l
+        .block(b"vstk")
+        .and_then(|b| descriptor::parse_block(b, 4).ok())
+        .and_then(|d| vector::parse_stroke(&d))
+        .filter(|s| s.visible())?;
+    let vm = l.block(b"vmsk").or(l.block(b"vsms")).and_then(|b| vector::parse(b, doc.width, doc.height));
+    let vm = vm.filter(|m| !m.disabled)?;
+    let line = s.rasterize(&vm, x, y, w, h);
+    let paint = s.content.as_ref().map_or(Fill::Solid([0.0; 3]), |d| Fill::parse(d, cs));
+    Some((paint.render(doc, cs, x, y, w, h, Some(&line), paint_bounds(doc, l, Some(&vm))), s.opacity))
 }
 
 /// Re-renders type layer `l`, clipped to the canvas grown by `pad`. `Err` when its text cannot

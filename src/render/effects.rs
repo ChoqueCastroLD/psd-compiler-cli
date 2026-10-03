@@ -137,8 +137,19 @@ pub(crate) struct Layered {
     pub tint: Tint,
     pub mode: BlendMode,
     pub opacity: f32,
+    pub paint: Paint,
+}
+
+/// How a [`Layered`] effect folds into the layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Paint {
+    /// Composites over the layer.
+    Over,
     /// Replaces the layer's pixels under it and blends with the backdrop (a stroke's inner band).
-    pub knock: bool,
+    Knock,
+    /// Recolors the layer's pixels, keeping their alpha (a shape's vector stroke, already part of
+    /// the layer's shape).
+    Recolor,
 }
 
 impl Layered {
@@ -181,6 +192,8 @@ pub(crate) struct Prepared {
     /// How many of the first `inner` effects (overlays, satins, inner glows) "Blend Interior
     /// Effects as Group" fades with the fill.
     pub interior: usize,
+    /// Where the strokes start in `inner`, above the other interior effects.
+    pub strokes: usize,
 }
 
 impl Prepared {
@@ -537,13 +550,19 @@ impl Effects {
             if s.knocked_out {
                 cov.iter_mut().zip(a).for_each(|(v, &al)| *v *= 1.0 - al * fill.clamp(0.0, 1.0));
             }
-            p.below.push(Layered { cov, tint: Tint::Solid(s.color), mode: s.mode, opacity: s.opacity, knock: false });
+            p.below.push(Layered {
+                cov,
+                tint: Tint::Solid(s.color),
+                mode: s.mode,
+                opacity: s.opacity,
+                paint: Paint::Over,
+            });
         }
         for g in &self.outer_glows {
             let mut cov = soft(grown(g.spread), g.size, g.spread, 0.0);
             shape_glow(g, &mut cov);
             let tint = glow_tint(g, &mut cov);
-            p.below.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity, knock: false });
+            p.below.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity, paint: Paint::Over });
         }
 
         for o in &self.pattern_overlays {
@@ -552,7 +571,7 @@ impl Effects {
                 tint: fill_tint(&o.fill),
                 mode: o.mode,
                 opacity: o.opacity,
-                knock: false,
+                paint: Paint::Over,
             });
         }
         for o in &self.gradient_overlays {
@@ -561,7 +580,7 @@ impl Effects {
                 tint: fill_tint(&o.fill),
                 mode: o.mode,
                 opacity: o.opacity,
-                knock: false,
+                paint: Paint::Over,
             });
         }
         for o in &self.color_overlays {
@@ -570,7 +589,7 @@ impl Effects {
                 tint: fill_tint(&o.fill),
                 mode: o.mode,
                 opacity: o.opacity,
-                knock: false,
+                paint: Paint::Over,
             });
         }
         for s in &self.satins {
@@ -590,7 +609,7 @@ impl Effects {
                 tint: Tint::Solid(s.color),
                 mode: s.mode,
                 opacity: s.opacity,
-                knock: false,
+                paint: Paint::Over,
             });
         }
         for g in &self.inner_glows {
@@ -598,7 +617,7 @@ impl Effects {
             let mut cov: Vec<f32> = if g.center { edge.iter().map(|v| 1.0 - v).collect() } else { edge };
             shape_glow(g, &mut cov);
             let tint = glow_tint(g, &mut cov);
-            p.inner.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity, knock: false });
+            p.inner.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity, paint: Paint::Over });
         }
         p.interior = p.inner.len();
         for s in &self.inner_shadows {
@@ -606,8 +625,15 @@ impl Effects {
             m.iter_mut().for_each(|v| *v = 1.0 - shaped(&s.contour, 1.0 - *v));
             let (dx, dy) = offset(s.angle, s.distance);
             let cov = shift(&m, w, h, dx, dy, 1.0);
-            p.inner.push(Layered { cov, tint: Tint::Solid(s.color), mode: s.mode, opacity: s.opacity, knock: false });
+            p.inner.push(Layered {
+                cov,
+                tint: Tint::Solid(s.color),
+                mode: s.mode,
+                opacity: s.opacity,
+                paint: Paint::Over,
+            });
         }
+        p.strokes = p.inner.len();
         // Strokes measure from pixel centers: a pixel's distance outward is the cheapest
         // `|p - q| + 1 - alpha(q)` over covered pixels, inward `|p - q| + alpha(q)` over pixels
         // that are not fully covered; the stroke covers `size + 1 - distance`.
@@ -639,14 +665,26 @@ impl Effects {
                 // On shapes the stroke follows the path, also where the fill is transparent.
                 if let Some(v) = path {
                     let cov = band.iter().zip(v).zip(a).map(|((&c, &p), &q)| c * (p - q).max(0.0)).collect();
-                    p.beside.push(Layered { cov, tint: tint.clone(), mode: s.mode, opacity: s.opacity, knock: false });
+                    p.beside.push(Layered {
+                        cov,
+                        tint: tint.clone(),
+                        mode: s.mode,
+                        opacity: s.opacity,
+                        paint: Paint::Over,
+                    });
                 }
                 let cov = band.iter().zip(a).map(|(&c, &q)| if q > 1e-6 { c } else { 0.0 }).collect();
-                p.inner.push(Layered { cov, tint: tint.clone(), mode: s.mode, opacity: s.opacity, knock: true });
+                p.inner.push(Layered {
+                    cov,
+                    tint: tint.clone(),
+                    mode: s.mode,
+                    opacity: s.opacity,
+                    paint: Paint::Knock,
+                });
             }
             if outer_r > 0.0 {
                 let cov = band(&outward, outer_r).iter().zip(src).map(|(&c, &q)| c * (1.0 - q)).collect();
-                p.beside.push(Layered { cov, tint, mode: s.mode, opacity: s.opacity, knock: false });
+                p.beside.push(Layered { cov, tint, mode: s.mode, opacity: s.opacity, paint: Paint::Over });
             }
         }
         if !knocked.is_empty() && !p.beside.is_empty() {
@@ -669,12 +707,36 @@ impl Effects {
             let (hc, ho, hm) = b.highlight;
             let (sc, so, sm) = b.shadow;
             if b.style != BevelStyle::Outer {
-                p.inner.push(Layered { cov: inner(&lo), tint: Tint::Solid(sc), mode: sm, opacity: so, knock: false });
-                p.inner.push(Layered { cov: inner(&hi), tint: Tint::Solid(hc), mode: hm, opacity: ho, knock: false });
+                p.inner.push(Layered {
+                    cov: inner(&lo),
+                    tint: Tint::Solid(sc),
+                    mode: sm,
+                    opacity: so,
+                    paint: Paint::Over,
+                });
+                p.inner.push(Layered {
+                    cov: inner(&hi),
+                    tint: Tint::Solid(hc),
+                    mode: hm,
+                    opacity: ho,
+                    paint: Paint::Over,
+                });
             }
             if b.style != BevelStyle::Inner {
-                p.beside.push(Layered { cov: outer(&lo), tint: Tint::Solid(sc), mode: sm, opacity: so, knock: false });
-                p.beside.push(Layered { cov: outer(&hi), tint: Tint::Solid(hc), mode: hm, opacity: ho, knock: false });
+                p.beside.push(Layered {
+                    cov: outer(&lo),
+                    tint: Tint::Solid(sc),
+                    mode: sm,
+                    opacity: so,
+                    paint: Paint::Over,
+                });
+                p.beside.push(Layered {
+                    cov: outer(&hi),
+                    tint: Tint::Solid(hc),
+                    mode: hm,
+                    opacity: ho,
+                    paint: Paint::Over,
+                });
             }
         }
         if cs.plane() == Some(1) {
@@ -795,7 +857,15 @@ pub(crate) fn assemble(
                 pc = pc.map(|v| v * fill);
             }
             let (color, ta) = e.tint.at(i);
-            if e.knock {
+            if e.paint == Paint::Recolor {
+                // The layer's own alpha is applied later: cover it in proportion.
+                let k = (e.cov[i] * ta * e.opacity / c[3].max(1e-6)).min(1.0);
+                for ch in 0..3 {
+                    pc[ch] += k * (color[ch] * ac - pc[ch]);
+                }
+                continue;
+            }
+            if e.paint == Paint::Knock {
                 // Inside its band the stroke replaces the layer's pixels, over the backdrop.
                 let c = e.cov[i] * ta;
                 if c <= 0.0 {
@@ -1045,7 +1115,7 @@ mod tests {
             tint: Tint::Solid([0.0, 0.0, 1.0]),
             mode: BlendMode::Normal,
             opacity: 0.5,
-            knock: false,
+            paint: Paint::Over,
         };
         let out = assemble(&content, &[1.0], (1.0, 0), 1.0, std::slice::from_ref(&overlay), None);
         assert_eq!(out.px, [0.5, 0.0, 0.5, 1.0]);
@@ -1062,8 +1132,13 @@ mod tests {
     fn assemble_knocks_out_under_inner_strokes() {
         let content = Raster { x: 0, y: 0, w: 1, h: 1, px: vec![1.0, 0.0, 0.0, 1.0] };
         let backdrop = Raster { x: 0, y: 0, w: 1, h: 1, px: vec![0.0, 1.0, 0.0, 1.0] };
-        let stroke =
-            |mode| Layered { cov: vec![1.0], tint: Tint::Solid([0.0, 0.0, 1.0]), mode, opacity: 0.5, knock: true };
+        let stroke = |mode| Layered {
+            cov: vec![1.0],
+            tint: Tint::Solid([0.0, 0.0, 1.0]),
+            mode,
+            opacity: 0.5,
+            paint: Paint::Knock,
+        };
         // A half-opaque stroke shows the backdrop through it, not the layer's red.
         let out = assemble(&content, &[1.0], (1.0, 0), 1.0, &[stroke(BlendMode::Normal)], Some(&backdrop));
         assert_eq!(out.px, [0.0, 0.0, 0.5, 0.5]);
@@ -1073,13 +1148,29 @@ mod tests {
     }
 
     #[test]
+    fn recolor_keeps_the_layer_alpha() {
+        // A half-covered edge pixel of a red shape whose blue vector stroke covers it as much.
+        let content = Raster { x: 0, y: 0, w: 1, h: 1, px: vec![0.5, 0.0, 0.0, 0.5] };
+        let stroke = Layered {
+            cov: vec![0.5],
+            tint: Tint::Solid([0.0, 0.0, 1.0]),
+            mode: BlendMode::Normal,
+            opacity: 1.0,
+            paint: Paint::Recolor,
+        };
+        // Fully blue; the layer's coverage still halves it when painted.
+        let out = assemble(&content, &[1.0], (1.0, 0), 1.0, &[stroke], None);
+        assert_eq!(out.px, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
     fn neutral_modes_fade_toward_their_neutral() {
         let burn = Layered {
             cov: vec![1.0],
             tint: Tint::Solid([0.0; 3]),
             mode: BlendMode::ColorBurn,
             opacity: 0.5,
-            knock: false,
+            paint: Paint::Over,
         };
         // Color burn with black at half strength burns with mid gray at full alpha.
         let r = burn.raster(0, 0, 1, 1, 1.0, None);

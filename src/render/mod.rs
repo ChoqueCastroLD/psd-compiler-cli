@@ -521,6 +521,24 @@ impl Compositor<'_> {
         }
     }
 
+    /// Paints the vector stroke of shape layer `l` back over `target`, its content with the clipped
+    /// layers merged in, keeping the content's alpha.
+    fn restroke(&self, l: &Layer, target: &mut Raster) {
+        if l.kind != LayerKind::Fill {
+            return;
+        }
+        let rect = (target.x, target.y, target.w, target.h);
+        let Some((stroke, opacity)) = layer::shape_stroke(self.ctx.doc, &self.ctx.cs, l, rect) else { return };
+        for (p, q) in target.px.chunks_exact_mut(4).zip(stroke.px.chunks_exact(4)) {
+            let k = (q[3] * opacity / p[3].max(1e-6)).min(1.0);
+            if q[3] > 0.0 && p[3] > 0.0 {
+                for ch in 0..3 {
+                    p[ch] += k * (q[ch] / q[3] * p[3] - p[ch]);
+                }
+            }
+        }
+    }
+
     /// Composites one source: a layer's content or a group's result, with its clipped layers,
     /// mask and effects.
     fn draw_source(&mut self, l: &Layer, mode: BlendMode, mut s: Source, clips: &[&Node], comp: &mut Comp) {
@@ -557,6 +575,28 @@ impl Compositor<'_> {
             };
             s.prepared = s.effects.prepare(self.ctx.doc, &self.ctx.cs, &s.coverage, None, rect, f, (bounds, bounds));
         }
+        // A shape's vector stroke is drawn like an effect: above the interior effects and the
+        // clipped layers merged into the content, below the layer style's strokes.
+        if l.kind == LayerKind::Fill && (!s.prepared.inner.is_empty() || !clips.is_empty() && !interior_grouped) {
+            if let Some((stroke, opacity)) = layer::shape_stroke(self.ctx.doc, &self.ctx.cs, l, rect) {
+                let cov = stroke.px.chunks_exact(4).map(|q| q[3]).collect();
+                let tint = effects::Tint::Map(
+                    stroke
+                        .px
+                        .chunks_exact(4)
+                        .map(|q| [0, 1, 2, 3].map(|ch| if ch == 3 { 1.0 } else { q[ch] / q[3].max(1e-6) }))
+                        .collect(),
+                );
+                let at = s.prepared.strokes.min(s.prepared.inner.len());
+                let e =
+                    effects::Layered { cov, tint, mode: BlendMode::Normal, opacity, paint: effects::Paint::Recolor };
+                s.prepared.inner.insert(at, e);
+                if s.prepared.interior > at {
+                    s.prepared.interior += 1;
+                }
+                s.prepared.strokes = at + 1;
+            }
+        }
         for e in &s.prepared.below {
             comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, None), None, e.mode, 0);
         }
@@ -586,6 +626,7 @@ impl Compositor<'_> {
                 }
                 p[3] = a;
             }
+            self.restroke(l, &mut body);
         }
         if o < 1.0 {
             body.px.iter_mut().for_each(|v| *v *= o);
