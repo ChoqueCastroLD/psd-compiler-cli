@@ -171,7 +171,7 @@ fn shape_raster(doc: &Document, cs: &ColorSpace, l: &Layer, bake: bool) -> Optio
 
 /// Re-renders type layer `l`, clipped to the canvas grown by `pad`. `Err` when its text cannot
 /// be read, so the cached pixels stand in.
-fn text_raster(
+pub(crate) fn text_raster(
     doc: &Document,
     l: &Layer,
     fonts: &crate::fonts::FontDb,

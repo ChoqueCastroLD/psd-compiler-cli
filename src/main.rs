@@ -24,9 +24,10 @@ struct Cli {
     #[arg(short, long, value_name = "PATH")]
     output: Option<PathBuf>,
 
-    /// Output format: png, jpg, webp, tif or avif. Defaults to the output file's extension, else png.
+    /// Output format: png, jpg, webp, tif, avif, or psd to write the edited document back.
+    /// Defaults to the output file's extension, else png.
     #[arg(short = 'F', long, value_name = "FORMAT", value_parser = parse_format)]
-    format: Option<Format>,
+    format: Option<Target>,
 
     /// JPEG and AVIF quality, 1 to 100.
     #[arg(short = 'Q', long, default_value_t = psd_compiler::DEFAULT_QUALITY, value_parser = clap::value_parser!(u8).range(1..=100))]
@@ -102,10 +103,27 @@ Examples:
   psdc page.psd --list-text          show the type layers
   psdc page.psd --set-text 'Title=Hello\\nworld' -o hello.png
   psdc page.psd --set-text 'Card/Title=Hi'   edit text inside a smart object
-  psdc page.psd --font-map CCWildWords-Roman=Anton-Regular";
+  psdc page.psd --font-map CCWildWords-Roman=Anton-Regular
+  psdc es.psd --set-text 'Title=Hello' -o en.psd   save the edited document";
 
-fn parse_format(s: &str) -> Result<Format, String> {
-    Format::from_extension(s).ok_or_else(|| format!("unknown format {s:?} (png, jpg, webp, tif, avif)"))
+/// What to write: an image, or the document itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Image(Format),
+    Psd,
+}
+
+impl Target {
+    fn from_extension(ext: &str) -> Option<Target> {
+        match ext.to_ascii_lowercase().as_str() {
+            "psd" | "psb" => Some(Target::Psd),
+            e => Format::from_extension(e).map(Target::Image),
+        }
+    }
+}
+
+fn parse_format(s: &str) -> Result<Target, String> {
+    Target::from_extension(s).ok_or_else(|| format!("unknown format {s:?} (png, jpg, webp, tif, avif, psd)"))
 }
 
 fn parse_color(s: &str) -> Result<[u8; 3], String> {
@@ -152,21 +170,39 @@ fn font_db(cli: &Cli) -> Result<FontDb> {
 }
 
 /// The output path and format for `input`.
-fn output_for(cli: &Cli, input: &Path) -> Result<(PathBuf, Format)> {
+fn output_for(cli: &Cli, input: &Path) -> Result<(PathBuf, Target)> {
     let single = cli.output.as_ref().filter(|out| cli.inputs.len() == 1 && !out.is_dir());
-    let format = match (cli.format, single) {
+    let target = match (cli.format, single) {
         (Some(f), _) => f,
-        (None, Some(out)) if out.extension().is_some() => Format::from_path(out)
-            .with_context(|| format!("unknown image format for {} (use png, jpg, webp, tif or avif)", out.display()))?,
-        _ => Format::Png,
+        (None, Some(out)) if out.extension().is_some() => {
+            out.extension().and_then(|e| e.to_str()).and_then(Target::from_extension).with_context(|| {
+                format!("unknown format for {} (use png, jpg, webp, tif, avif or psd)", out.display())
+            })?
+        }
+        _ => Target::Image(Format::Png),
     };
-    let name = || PathBuf::from(input.file_name().unwrap_or_default()).with_extension(format.extension());
+    let ext = match target {
+        Target::Image(f) => f.extension(),
+        // A document keeps its own kind: PSB stays PSB.
+        Target::Psd => input.extension().and_then(|e| e.to_str()).unwrap_or("psd"),
+    };
+    let name = || PathBuf::from(input.file_name().unwrap_or_default()).with_extension(ext);
     let path = match (&cli.output, single) {
         (_, Some(out)) => out.clone(),
         (Some(dir), None) => dir.join(name()),
-        (None, _) => input.with_extension(format.extension()),
+        (None, _) => input.with_extension(ext),
     };
-    Ok((path, format))
+    if target == Target::Psd && same_file(&path, input) {
+        bail!("{}: refusing to overwrite the input; choose another output with -o", input.display());
+    }
+    Ok((path, target))
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 fn list_text(doc: &Document, input: &Path) {
@@ -183,10 +219,33 @@ fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
+/// Writes the edited document back to `output`.
+fn save_psd(
+    cli: &Cli,
+    fonts: &FontDb,
+    options: &RenderOptions,
+    doc: &Document,
+    original: &[u8],
+    input: &Path,
+    output: &Path,
+) -> Result<()> {
+    let (data, warnings) =
+        doc.to_psd(original, fonts, options).with_context(|| format!("cannot write {}", output.display()))?;
+    std::fs::write(output, data).with_context(|| format!("cannot write {}", output.display()))?;
+    if !cli.quiet {
+        for w in &warnings {
+            eprintln!("warning: {}: {w}", input.display());
+        }
+        eprintln!("{} -> {}", input.display(), output.display());
+    }
+    Ok(())
+}
+
 fn compile(cli: &Cli, fonts: &FontDb, input: &Path) -> Result<()> {
-    let (output, format) = output_for(cli, input)?;
+    let (output, target) = output_for(cli, input)?;
     let start = Instant::now();
-    let mut doc = Document::open(input).with_context(|| format!("cannot read {}", input.display()))?;
+    let original = std::fs::read(input).with_context(|| format!("cannot read {}", input.display()))?;
+    let mut doc = Document::parse(&original).with_context(|| format!("cannot read {}", input.display()))?;
     if cli.list_text {
         list_text(&doc, input);
         return Ok(());
@@ -201,6 +260,10 @@ fn compile(cli: &Cli, fonts: &FontDb, input: &Path) -> Result<()> {
         keep_text_raster: cli.keep_text,
         text_masks: cli.text_masks.is_some(),
         render_smart_objects: cli.render_smart_objects,
+    };
+    let format = match target {
+        Target::Image(f) => f,
+        Target::Psd => return save_psd(cli, fonts, &options, &doc, &original, input, &output),
     };
     let rendered = render(&doc, fonts, &options);
     let drawn = ms(start);

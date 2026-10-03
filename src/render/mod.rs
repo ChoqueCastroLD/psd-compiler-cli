@@ -11,6 +11,7 @@ pub(crate) mod effects;
 pub(crate) mod fill;
 mod layer;
 pub(crate) mod mask;
+pub(crate) mod save;
 mod smart;
 pub(crate) mod vector;
 
@@ -682,6 +683,11 @@ fn composite_image(ctx: &Ctx) -> Raster {
 ///
 /// Leaf layers render in parallel on the current rayon pool; compositing then follows the layer tree.
 pub fn render(doc: &Document, fonts: &FontDb, options: &RenderOptions) -> Rendered {
+    render_inner(doc, fonts, options, true)
+}
+
+/// Renders `doc`; without `finish` the image stays in the document's color space.
+pub(crate) fn render_inner(doc: &Document, fonts: &FontDb, options: &RenderOptions, finish: bool) -> Rendered {
     let ctx = Ctx { doc, fonts, options, cs: ColorSpace::new(doc) };
     let (w, h) = (doc.width as usize, doc.height as usize);
     let mut warnings = vec![];
@@ -708,7 +714,9 @@ pub fn render(doc: &Document, fonts: &FontDb, options: &RenderOptions) -> Render
         comp.cv
     };
     let mut image = Image::from_premultiplied(doc.width, doc.height, &cv.px);
-    ctx.cs.finish(&mut image.data);
+    if finish {
+        ctx.cs.finish(&mut image.data);
+    }
     Rendered { image, warnings, text_masks }
 }
 

@@ -4,6 +4,7 @@ mod channel;
 pub(crate) mod descriptor;
 pub(crate) mod engine;
 pub(crate) mod reader;
+pub(crate) mod write;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -131,6 +132,8 @@ pub struct Layer {
     pub(crate) vector_feather: f64,
     pub(crate) channels: HashMap<i16, Vec<u8>>,
     pub(crate) blocks: HashMap<[u8; 4], Vec<u8>>,
+    /// Changed since parsing; its pixels are re-rendered when the document is written.
+    pub(crate) edited: bool,
 }
 
 impl Layer {
@@ -154,6 +157,7 @@ impl Layer {
             bail!("layer {:?} is not a type layer", self.name);
         };
         *block = crate::text::edit::replace_text(block, text)?;
+        self.edited = true;
         Ok(())
     }
 
@@ -390,6 +394,7 @@ fn read_record(r: &mut Reader) -> Result<Record> {
         vector_feather: 0.0,
         channels: HashMap::new(),
         blocks: blocks.data.iter().map(|(k, v)| (*k, v.to_vec())).collect(),
+        edited: false,
     };
     Ok(Record { layer, channels, mask_info })
 }
@@ -708,6 +713,29 @@ impl Document {
             }
         }
         Ok(0)
+    }
+
+    /// Writes the document back as PSD or PSB (the version of `original`), with the edits made
+    /// through [`Document::set_text`]. `original` must be the file the document was parsed from.
+    ///
+    /// Edited type layers get their new text and freshly rendered pixels, edited smart objects
+    /// their new contents and pixels, and the composite image is re-rendered; everything else is
+    /// copied unchanged. Returns the file and the warnings from rendering. Supports 8- and 16-bit
+    /// RGB and grayscale documents.
+    pub fn to_psd(
+        &self,
+        original: &[u8],
+        fonts: &crate::FontDb,
+        options: &crate::RenderOptions,
+    ) -> Result<(Vec<u8>, Vec<crate::Warning>)> {
+        if !self.layers.iter().any(|l| l.edited) && self.edited.is_empty() {
+            return Ok((original.to_vec(), vec![]));
+        }
+        if !matches!(self.color_mode, ColorMode::Rgb | ColorMode::Grayscale) || !matches!(self.depth, 8 | 16) {
+            bail!("writing PSD supports 8- and 16-bit RGB and grayscale documents");
+        }
+        let (edits, warnings) = crate::render::save::psd_edits(self, fonts, options)?;
+        Ok((write::write(original, self, &edits)?, warnings))
     }
 
     /// Reads and parses a PSD or PSB file.
