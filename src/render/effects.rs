@@ -221,6 +221,8 @@ fn enabled<'a>(fx: &'a Descriptor, single: &str, multi: &str) -> Vec<&'a Descrip
                 Value::Descriptor(d) => Some(d),
                 _ => None,
             })
+            // Listed top first; painted bottom first.
+            .rev()
             .collect(),
         None => fx.desc(single).into_iter().collect(),
     };
@@ -652,8 +654,9 @@ impl Effects {
             .then(|| soft_distance(|i| (src[i] > 0.0).then(|| 0.5 + edge[i]), w, h, reach));
         let inward = need(|p| *p != StrokePosition::Outside)
             .then(|| soft_distance(|i| (src[i] < 1.0).then(|| 0.5 - edge[i]), w, h, reach));
-        // The first stroke's coverage on the layer and beside it, for stroke embosses.
+        // The top stroke's coverage on the layer and beside it, for stroke embosses.
         let mut embossed: Option<(Vec<f32>, Vec<f32>)> = None;
+        let first = (p.inner.len(), p.beside.len());
         for s in &self.strokes {
             let r = s.size as f32;
             let mut covs = (vec![0.0; w * h], vec![0.0; w * h]);
@@ -697,7 +700,18 @@ impl Effects {
                 covs.1.clone_from(&cov);
                 p.beside.push(Layered { cov, tint, mode: s.mode, opacity: s.opacity, paint: Paint::Over });
             }
-            embossed.get_or_insert(covs);
+            embossed = Some(covs);
+        }
+        // Each stroke covers the strokes below it: a multiplying stroke multiplies the backdrop.
+        for (layers, from) in [(&mut p.inner, first.0), (&mut p.beside, first.1)] {
+            let mut taken = vec![0f32; w * h];
+            for e in layers[from..].iter_mut().rev() {
+                for (v, t) in e.cov.iter_mut().zip(taken.iter_mut()) {
+                    let c = *v;
+                    *v *= 1.0 - *t;
+                    *t += c * (1.0 - *t);
+                }
+            }
         }
         if !knocked.is_empty() && !p.beside.is_empty() {
             // Strokes beside the layer knock out its shadows too.
@@ -1216,6 +1230,33 @@ mod tests {
         assert_eq!(offset(120.0, 5.0), (3, 4));
         assert_eq!(offset(-60.0, 5.0), (-3, -4));
         assert_eq!(offset(-170.0, 30.0), (30, -5));
+    }
+
+    #[test]
+    fn upper_strokes_cover_lower_ones() {
+        let stroke = |size: f64, rgb_: (f64, f64, f64), mode: &str| {
+            Value::Descriptor(desc(vec![
+                ("enab", Value::Bool(true)),
+                ("Styl", Value::Enum("FStl".into(), "OutF".into())),
+                ("Md  ", Value::Enum("BlnM".into(), mode.into())),
+                ("Sz  ", unit(size)),
+                ("Clr ", rgb(rgb_.0, rgb_.1, rgb_.2)),
+            ]))
+        };
+        // Listed top first, like ag-psd read-write/strokes: a thin multiplying yellow over blue.
+        let fx = desc(vec![(
+            "frameFXMulti",
+            Value::List(vec![stroke(2.0, (250.0, 230.0, 100.0), "Mltp"), stroke(5.0, (130.0, 190.0, 235.0), "Nrml")]),
+        )]);
+        let e = parse(&fx, &doc(), &ColorSpace::default());
+        assert_eq!(e.strokes.iter().map(|s| s.size).collect::<Vec<_>>(), [5.0, 2.0]);
+        let (w, h) = (30, 30);
+        let a = square(w, h, 10, 20);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
+        let (blue, yellow) = (&p.beside[0].cov, &p.beside[1].cov);
+        // Next to the layer only the yellow paints, so it multiplies the backdrop, not the blue.
+        assert_eq!((blue[15 * w + 21], yellow[15 * w + 21]), (0.0, 1.0));
+        assert_eq!((blue[15 * w + 24], yellow[15 * w + 24]), (1.0, 0.0));
     }
 
     #[test]

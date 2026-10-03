@@ -24,8 +24,8 @@ the files are committed here.
 | Suite | Match |
 |---|---|
 | psd-tools `tests/psd_files` | 266 / 274 (97.1%) |
-| ag-psd `test` | 72 / 76 (94.7%) |
-| Both | 338 / 350 (96.6%) |
+| ag-psd `test` | 73 / 76 (96.1%) |
+| Both | 339 / 350 (96.9%) |
 
 ### Misses
 
@@ -38,7 +38,7 @@ the files are committed here.
 | `effects/shape-fx2.psd` | Effect edges off by about a tenth of a pixel along a 45° edge, on a 32×32 canvas (4% of pixels). |
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
-| ag-psd `read-write/strokes`, `multiple-strokes-test.psd` | Several strokes on one layer, and stroke edges at sharp corners. |
+| ag-psd `multiple-strokes-test.psd` | Strokes around soft brush edges reach about 0.2 px further than Photoshop's (1.4% of pixels). |
 
 ## Calibrated models
 
@@ -53,7 +53,9 @@ Measured against the stored composites:
   as the box clips it: half-length `min(w/|cos|, h/|sin|) · scale / 2`.
 - **Strokes** measure distance from pixel centers. The inside band replaces the layer's pixels;
   outside strokes knock out the drop shadow under the layer. Gradient strokes span the stroke's
-  outer edge.
+  outer edge. Several strokes on one layer are listed top first; each covers the ones below it,
+  so a multiplying stroke multiplies the backdrop rather than the stroke under it. Other
+  multiple effects are listed top first too.
 - **Shape strokes** (vector stroke) are drawn above the layer's overlays and clipped layers, below
   its layer style strokes, keeping the shape's alpha.
 - **Shadows and glows**: Gaussian with sigma `0.45 · (size − spread)`, its taps closer than
