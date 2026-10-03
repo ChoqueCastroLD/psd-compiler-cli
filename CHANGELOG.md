@@ -22,7 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Smart objects linked to files outside the document, found next to it or at their absolute path; `Document::open` and `Document::set_base_dir`.
 - Smart filters on re-rendered smart objects: blurs, sharpening, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves and brightness/contrast, with their blending options.
 - Writing CMYK, Lab, duotone, indexed and 32-bit documents.
-- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the test files of psd-tools, ag-psd, webtoon/psd, psd.rb, chinedufn/psd, PhotoshopAPI, psd_sdk, psd.js, Krita, Aspose.PSD and oov/psd (715/732 match; see docs/REFERENCE.md).
+- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the test files of psd-tools, ag-psd, webtoon/psd, psd.rb, chinedufn/psd, PhotoshopAPI, psd_sdk, psd.js, Krita, Aspose.PSD, oov/psd and Artal (719/736 match; see docs/REFERENCE.md).
 - Stroke emboss bevels.
 - Non-legacy brightness/contrast as Photoshop runs it: brightness, then contrast.
 - Color lookup tables read in the order the layer names; color balance midtones as a per-channel gamma.

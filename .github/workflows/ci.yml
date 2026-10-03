@@ -62,6 +62,7 @@ jobs:
       KRITA_COMMIT: 351297cdcec48aee3228f6c64a68d5d3b09e1796
       ASPOSE_PSD_COMMIT: 1340b4d47babd4ba582ba7c629666aeedfdc03b4
       OOV_PSD_COMMIT: a5d50ec0acac8b2f47d16ead6a1190a0352f2299
+      ARTAL_COMMIT: 1edd7aafbe40a6b1c491e0ac086ac9648a931c10
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -100,6 +101,7 @@ jobs:
           # Only oov/psd's files saved by Photoshop: the others were written by other painting apps.
           rm -rf oov-psd/composite
           (cd oov-psd/testdata && rm -f benchmark.psd mod.psd ibispaint.psd photopea.psd sketchbook.psd rgb8bit_nobg_transparent_medibang.psd)
+          fetch artal EvineDev/Artal "$ARTAL_COMMIT"
           rm -rf webtoon-psd/packages/psd/tests/integration/fixtures/errors
           # Only Krita's PSD test files, not the whole tree.
           git init -q krita
@@ -118,4 +120,4 @@ jobs:
           find aspose-psd -iregex '.*\(changed\|added\|edited\|merged\|flattened\|_out\|croptest\|imagewithtextlayer\).*' -delete
       - run: cargo test --release --test reference -- --nocapture
         env:
-          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js:krita/plugins/impex/psd/tests/data:aspose-psd/Examples/Data/PSD:oov-psd/testdata
+          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js:krita/plugins/impex/psd/tests/data:aspose-psd/Examples/Data/PSD:oov-psd/testdata:artal/tests/cases
