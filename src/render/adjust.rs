@@ -402,13 +402,11 @@ fn color_balance(r: &mut Reader) -> Option<ColorFn> {
     Some(Box::new(move |c| {
         let mut o = [0f32; 3];
         for ch in 0..3 {
-            let x = c[ch];
+            // Midtones bend each channel by a gamma of 2^-m (fit to Photoshop's AllAdjustments).
+            let x = c[ch].clamp(0.0, 1.0).powf((-v[1][ch]).exp2());
             let shadows = ((0.333 - x) / 0.25 + 0.5).clamp(0.0, 1.0) * 0.7;
-            let mid_a = ((x - 0.333) / 0.25 + 0.5).clamp(0.0, 1.0);
-            let mid_b = ((1.0 - x - 0.333) / 0.25 + 0.5).clamp(0.0, 1.0);
-            let mids = mid_a * mid_b * 0.7;
             let highs = ((x - 0.667) / 0.25 + 0.5).clamp(0.0, 1.0) * 0.7;
-            o[ch] = (x + v[0][ch] * shadows + v[1][ch] * mids + v[2][ch] * highs).clamp(0.0, 1.0);
+            o[ch] = (x + v[0][ch] * shadows + v[2][ch] * highs).clamp(0.0, 1.0);
         }
         if preserve {
             let hsl = rgb_to_hsl(o);
@@ -686,6 +684,16 @@ mod tests {
         let t = threshold(&mut Reader::new(&[0, 128]), &ColorSpace::default()).unwrap();
         assert_eq!(t([0.6, 0.6, 0.6]), [1.0; 3]);
         assert_eq!(t([0.4, 0.4, 0.4]), [0.0; 3]);
+    }
+
+    #[test]
+    fn color_balance_midtones_are_a_gamma() {
+        let mut b = [0i16; 9];
+        b[3] = -100;
+        let mut data: Vec<u8> = b.iter().flat_map(|x| x.to_be_bytes()).collect();
+        data.push(0);
+        let o = color_balance(&mut Reader::new(&data)).unwrap()([0.5; 3]);
+        assert!((o[0] - 0.25).abs() < 1e-4 && o[1] == 0.5 && o[2] == 0.5, "{o:?}");
     }
 
     fn grdm(version: u16, method: &[u8; 4]) -> Vec<u8> {

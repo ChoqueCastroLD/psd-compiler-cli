@@ -25,6 +25,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the test files of psd-tools, ag-psd, webtoon/psd, psd.rb, chinedufn/psd, PhotoshopAPI, psd_sdk, psd.js and Krita (502/511 match; see docs/REFERENCE.md).
 - Stroke emboss bevels.
 - Non-legacy brightness/contrast as Photoshop runs it: brightness, then contrast.
+- Color lookup tables read in the order the layer names; color balance midtones as a per-channel gamma.
 - Patterns shrunk below their size average the texels each pixel covers.
 - Strokes measured with Photoshop's chamfer distance, faceted like its large strokes.
 - Several strokes, shadows and overlays per layer in Photoshop's order (listed top first), upper strokes covering lower ones.

@@ -91,6 +91,10 @@ Measured against the stored composites:
   level `b` steps along a fixed field (so +b and −b undo each other and keep black and white);
   contrast is a spline through (55, 55 − 0.27c) and (200, 200 + 0.27c), pivoting on middle gray.
   Grayscale and CMYK documents use the same curve on their stored values.
+- **Color Balance** midtones bend each channel by a gamma of `2^(−m/100)`, each output depending
+  only on its own channel.
+- **Color Lookup** CUBE tables name their loops outer to inner: `bgrOrder` runs red fastest,
+  `rgbOrder` blue fastest.
 - **Patterns** shrunk below their size average the texels each pixel covers rather than sample one.
 - **Text** blends with gamma 1.53 (Photoshop's "Blend Text Colors Using Gamma"): coverage mixes
   `B^γ` and `S^γ`, so antialiased edges look heavier than a plain alpha blend.

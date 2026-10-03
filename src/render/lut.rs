@@ -73,9 +73,10 @@ pub(crate) fn parse(d: &Descriptor) -> Result<Lookup, &'static str> {
                 };
             };
             let text = String::from_utf8_lossy(data);
+            // The table order names the loops from outer to inner: `bgrOrder` runs red fastest.
             let blue_fastest = match d.enumerated("tableOrder") {
-                Some("bgrOrder") => Some(true),
-                Some("rgbOrder") => Some(false),
+                Some("bgrOrder") => Some(false),
+                Some("rgbOrder") => Some(true),
                 _ => None,
             };
             let bgr_values = d.enumerated("dataOrder") == Some("bgrOrder");
