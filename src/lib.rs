@@ -32,10 +32,11 @@ pub mod png;
 mod psd;
 mod render;
 mod text;
+mod tiff;
 
 pub use blend::BlendMode;
 pub use error::{Error, Result};
 pub use fonts::FontDb;
-pub use image::{Image, DEFAULT_COMPRESSION};
+pub use image::{EncodeOptions, Format, Image, DEFAULT_COMPRESSION, DEFAULT_QUALITY};
 pub use psd::{ColorMode, Document, Layer, LayerKind, Rect};
 pub use render::{render, RenderOptions, Rendered, TextMask, Warning};

@@ -155,3 +155,30 @@ fn text_masks_cover_glyphs() {
         assert!(full[(y * 160 + x) as usize] > 0, "ink at {x},{y} outside mask");
     }
 }
+
+#[test]
+fn set_text_replaces_and_keeps_styles() {
+    let text = Text::runs(
+        vec![Run::new("RRR", "Base", 40.0, [255.0, 0.0, 0.0]), Run::new("BBB", "Base", 40.0, [0.0, 0.0, 255.0])],
+        10.0,
+        50.0,
+    );
+    let mut doc = Document::parse(&white(300, 80).layer(Layer::text("t", &text)).build()).unwrap();
+    assert_eq!(doc.set_text("t", "Hola\nmundo").unwrap(), 1);
+    assert_eq!(doc.layers[1].text().as_deref(), Some("Hola\rmundo"));
+    assert_eq!(doc.set_text("missing", "x").unwrap(), 0);
+    assert!(doc.layers[0].set_text("x").is_err());
+}
+
+#[test]
+fn set_text_renders_new_text() {
+    let (db, font) = font_or_skip!();
+    let text = Text::new("I", font, 40.0, [0.0; 3], 20.0, 60.0);
+    let mut doc = Document::parse(&white(400, 100).layer(Layer::text("t", &text)).build()).unwrap();
+    let before = extent(&ink(&render(&doc, &db, &Default::default()).image));
+    doc.layers[1].set_text("WIDE WORDS").unwrap();
+    let out = render(&doc, &db, &Default::default());
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let after = extent(&ink(&out.image));
+    assert!(after.2 > before.2 + 100, "{before:?} -> {after:?}");
+}

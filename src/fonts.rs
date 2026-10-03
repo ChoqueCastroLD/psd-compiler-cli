@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 use rustybuzz::ttf_parser;
 
 const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
-const MAX_DEPTH: usize = 6;
 const FALLBACK_FAMILIES: [&str; 4] = ["dejavusans", "notosans", "liberationsans", "arial"];
 
 struct Face {
@@ -135,19 +134,24 @@ impl FontDb {
     /// Adds every `.ttf`, `.otf`, `.ttc` and `.otc` file under `dir`, recursively.
     /// Returns the number of faces added; missing folders add nothing.
     pub fn add_dir(&mut self, dir: impl AsRef<Path>) -> usize {
-        self.add_dir_at(dir.as_ref(), 0)
+        let mut seen = std::collections::HashSet::new();
+        self.add_dir_walk(dir.as_ref(), &mut seen)
     }
 
-    fn add_dir_at(&mut self, dir: &Path, depth: usize) -> usize {
+    /// Walks `dir` at any depth; `seen` holds canonical folders already visited, so symlink loops
+    /// end.
+    fn add_dir_walk(&mut self, dir: &Path, seen: &mut std::collections::HashSet<PathBuf>) -> usize {
+        let Ok(real) = std::fs::canonicalize(dir) else { return 0 };
+        if !seen.insert(real) {
+            return 0;
+        }
         let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
         let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         paths.sort();
         let mut added = 0;
         for p in paths {
             if p.is_dir() {
-                if depth < MAX_DEPTH {
-                    added += self.add_dir_at(&p, depth + 1);
-                }
+                added += self.add_dir_walk(&p, seen);
             } else if has_font_extension(&p) {
                 added += self.add_file(&p);
             }
@@ -320,6 +324,25 @@ mod tests {
         assert_eq!(db.add_dir("/definitely/not/here"), 0);
         assert_eq!(db.add_file("/definitely/not/here.ttf"), 0);
         assert!(db.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walks_deep_folders_and_survives_symlink_loops() {
+        let Some(font) = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/Library/Fonts/Arial.ttf"]
+            .iter()
+            .map(Path::new)
+            .find(|p| p.exists())
+        else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a/b/c/d/e/f/g/h/i");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::copy(font, deep.join("font.ttf")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), deep.join("loop")).unwrap();
+        let mut db = FontDb::new();
+        assert_eq!(db.add_dir(dir.path()), 1);
     }
 
     #[test]

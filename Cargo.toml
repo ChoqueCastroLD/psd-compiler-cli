@@ -23,11 +23,19 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+image-webp = "0.2"
+jpeg-encoder = "0.6"
 mimalloc = { version = "0.1", default-features = false }
 moxcms = "0.8"
 rayon = "1"
+ravif = { version = "0.13", default-features = false, features = ["threading"], optional = true }
 rustybuzz = "0.20"
 tiny-skia = "0.11"
+
+[features]
+default = []
+# AVIF output (pure-Rust rav1e encoder; adds build time).
+avif = ["dep:ravif"]
 
 [dev-dependencies]
 png = "0.17"

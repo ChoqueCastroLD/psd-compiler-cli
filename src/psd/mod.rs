@@ -142,6 +142,19 @@ impl Layer {
         let tl = crate::text::TextLayer::parse(self.block(b"TySh")?).ok()?;
         Some(tl.chars.iter().collect::<String>().trim_end_matches('\r').to_string())
     }
+
+    /// Replaces the text of a type layer; `\n` or `\r` start a new paragraph.
+    ///
+    /// Each new paragraph keeps the paragraph settings of the old paragraph at the same position
+    /// (the last one when there are more) and the character style used most in it. The layer is
+    /// re-rendered from the new text by [`render`](crate::render).
+    pub fn set_text(&mut self, text: &str) -> Result<()> {
+        let Some(block) = self.blocks.get_mut(b"TySh") else {
+            bail!("layer {:?} is not a type layer", self.name);
+        };
+        *block = crate::text::edit::replace_text(block, text)?;
+        Ok(())
+    }
 }
 
 /// A parsed PSD or PSB document.
@@ -630,6 +643,17 @@ impl Document {
             linked: HashMap::new(),
             icc_profile: None,
         }
+    }
+
+    /// Replaces the text of every type layer named `name` (see [`Layer::set_text`]) and returns
+    /// how many were changed.
+    pub fn set_text(&mut self, name: &str, text: &str) -> Result<usize> {
+        let mut n = 0;
+        for l in self.layers.iter_mut().filter(|l| l.name == name && l.kind == LayerKind::Text) {
+            l.set_text(text)?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// Reads and parses a PSD or PSB file.

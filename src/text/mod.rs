@@ -1,5 +1,6 @@
 //! Type layers: text engine data model, line layout, glyph outlines and warps.
 
+pub(crate) mod edit;
 pub(crate) mod layout;
 pub(crate) mod path;
 pub(crate) mod warp;

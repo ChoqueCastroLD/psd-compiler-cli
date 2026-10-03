@@ -7,6 +7,71 @@ use crate::png::{self, ColorType};
 /// Default PNG compression level: fast, with files close to level 6.
 pub const DEFAULT_COMPRESSION: u8 = 2;
 
+/// Default JPEG and AVIF quality.
+pub const DEFAULT_QUALITY: u8 = 90;
+
+/// Output file format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    /// PNG, lossless with alpha.
+    Png,
+    /// Baseline JPEG; transparency is flattened onto [`EncodeOptions::background`].
+    Jpeg,
+    /// Lossless WebP with alpha (at most 16383 pixels per side).
+    WebP,
+    /// TIFF with Deflate compression and unassociated alpha.
+    Tiff,
+    /// AVIF with alpha; needs the `avif` cargo feature.
+    Avif,
+}
+
+impl Format {
+    /// The format named by a file extension (`png`, `jpg`/`jpeg`, `webp`, `tif`/`tiff`, `avif`).
+    pub fn from_extension(ext: &str) -> Option<Format> {
+        Some(match ext.to_ascii_lowercase().as_str() {
+            "png" => Format::Png,
+            "jpg" | "jpeg" => Format::Jpeg,
+            "webp" => Format::WebP,
+            "tif" | "tiff" => Format::Tiff,
+            "avif" => Format::Avif,
+            _ => return None,
+        })
+    }
+
+    /// The format of `path`, from its extension.
+    pub fn from_path(path: impl AsRef<Path>) -> Option<Format> {
+        path.as_ref().extension().and_then(|e| e.to_str()).and_then(Format::from_extension)
+    }
+
+    /// Usual file extension.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Jpeg => "jpg",
+            Format::WebP => "webp",
+            Format::Tiff => "tif",
+            Format::Avif => "avif",
+        }
+    }
+}
+
+/// Encoder settings; each format uses the ones that apply to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodeOptions {
+    /// PNG and TIFF compression level, 0 (fastest) to 9 (smallest).
+    pub compression: u8,
+    /// JPEG and AVIF quality, 1 to 100.
+    pub quality: u8,
+    /// Color that transparent pixels are flattened onto for JPEG.
+    pub background: [u8; 3],
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        EncodeOptions { compression: DEFAULT_COMPRESSION, quality: DEFAULT_QUALITY, background: [255; 3] }
+    }
+}
+
 /// 8-bit RGBA image with straight (non-premultiplied) alpha.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
@@ -62,6 +127,84 @@ impl Image {
     pub fn save_png(&self, path: impl AsRef<Path>, level: u8) -> std::io::Result<()> {
         std::fs::write(path, self.encode_png(level))
     }
+
+    /// RGB bytes with alpha flattened onto `bg`.
+    fn flatten(&self, bg: [u8; 3]) -> Vec<u8> {
+        self.data
+            .par_chunks(4)
+            .flat_map_iter(|p| {
+                let a = p[3] as u32;
+                [0, 1, 2].map(|c| ((p[c] as u32 * a + bg[c] as u32 * (255 - a) + 127) / 255) as u8)
+            })
+            .collect()
+    }
+
+    fn rgb_or_rgba(&self) -> (Vec<u8>, bool) {
+        if self.is_opaque() {
+            (self.data.par_chunks(4).flat_map_iter(|p| [p[0], p[1], p[2]]).collect(), false)
+        } else {
+            (self.data.clone(), true)
+        }
+    }
+
+    /// Encodes in `format`.
+    pub fn encode(&self, format: Format, options: &EncodeOptions) -> std::io::Result<Vec<u8>> {
+        let (w, h) = (self.width, self.height);
+        let quality = options.quality.clamp(1, 100);
+        match format {
+            Format::Png => Ok(self.encode_png(options.compression)),
+            Format::Jpeg => {
+                if w > u16::MAX as u32 || h > u16::MAX as u32 {
+                    return Err(std::io::Error::other("JPEG images are limited to 65535 pixels per side"));
+                }
+                let mut out = vec![];
+                jpeg_encoder::Encoder::new(&mut out, quality)
+                    .encode(&self.flatten(options.background), w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+                    .map_err(std::io::Error::other)?;
+                Ok(out)
+            }
+            Format::WebP => {
+                if w > 16383 || h > 16383 {
+                    return Err(std::io::Error::other("WebP images are limited to 16383 pixels per side"));
+                }
+                let (data, alpha) = self.rgb_or_rgba();
+                let color = if alpha { image_webp::ColorType::Rgba8 } else { image_webp::ColorType::Rgb8 };
+                let mut out = vec![];
+                image_webp::WebPEncoder::new(&mut out).encode(&data, w, h, color).map_err(std::io::Error::other)?;
+                Ok(out)
+            }
+            Format::Tiff => {
+                let (data, alpha) = self.rgb_or_rgba();
+                crate::tiff::encode(w, h, if alpha { 4 } else { 3 }, &data, options.compression)
+            }
+            #[cfg(feature = "avif")]
+            Format::Avif => {
+                let px: Vec<ravif::RGBA8> = self.data.chunks_exact(4).map(|p| ravif::RGBA8::new(p[0], p[1], p[2], p[3])).collect();
+                let img = ravif::Img::new(px.as_slice(), w as usize, h as usize);
+                let encoded = ravif::Encoder::new()
+                    .with_quality(quality as f32)
+                    .with_speed(6)
+                    .with_alpha_color_mode(ravif::AlphaColorMode::UnassociatedClean)
+                    .encode_rgba(img)
+                    .map_err(std::io::Error::other)?;
+                Ok(encoded.avif_file)
+            }
+            #[cfg(not(feature = "avif"))]
+            Format::Avif => Err(std::io::Error::other("AVIF output needs psd-compiler built with the `avif` feature")),
+        }
+    }
+
+    /// Writes `path` in the format named by its extension (PNG when it has none).
+    pub fn save(&self, path: impl AsRef<Path>, options: &EncodeOptions) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let format = match path.extension() {
+            None => Format::Png,
+            Some(_) => Format::from_path(path).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown image format: {}", path.display()))
+            })?,
+        };
+        std::fs::write(path, self.encode(format, options)?)
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +217,25 @@ mod tests {
         assert_eq!(img.pixel(0, 0), [128, 0, 255, 128]);
         assert_eq!(img.pixel(1, 0), [0, 0, 0, 0]);
         assert!(!img.is_opaque());
+    }
+
+    fn checker() -> Image {
+        let data = (0..64 * 48).flat_map(|i| if (i % 64 / 8 + i / 64 / 8) % 2 == 0 { [255, 0, 0, 255] } else { [0, 0, 255, 128] }).collect();
+        Image { width: 64, height: 48, data }
+    }
+
+    #[test]
+    fn encodes_every_format() {
+        let img = checker();
+        let o = EncodeOptions::default();
+        assert!(img.encode(Format::Jpeg, &o).unwrap().starts_with(&[0xFF, 0xD8]));
+        let webp = img.encode(Format::WebP, &o).unwrap();
+        assert!(webp.starts_with(b"RIFF") && &webp[8..12] == b"WEBP");
+        let tiff = img.encode(Format::Tiff, &o).unwrap();
+        assert!(tiff.starts_with(b"MM\0\x2a"));
+        assert_eq!(Format::from_extension("JPEG"), Some(Format::Jpeg));
+        assert_eq!(Format::from_path("a/b.tif"), Some(Format::Tiff));
+        assert_eq!(Format::from_path("a/b.psd"), None);
     }
 
     #[test]

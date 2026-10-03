@@ -72,3 +72,28 @@ fn help_mentions_fonts() {
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--fonts") && help.contains("PSDC_FONTS"));
 }
+
+#[test]
+fn picks_format_from_extension_or_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = sample(dir.path(), "page.psd", [10, 200, 30, 128]);
+    let jpg = dir.path().join("page.jpg");
+    assert!(psdc().arg(&input).arg("-o").arg(&jpg).args(["-q", "--no-system-fonts"]).status().unwrap().success());
+    assert!(std::fs::read(&jpg).unwrap().starts_with(&[0xFF, 0xD8]));
+    assert!(psdc().arg(&input).args(["-F", "webp", "-q", "--no-system-fonts"]).status().unwrap().success());
+    assert!(std::fs::read(dir.path().join("page.webp")).unwrap().starts_with(b"RIFF"));
+    let bad = psdc().arg(&input).args(["-o", "x.bmp", "-q", "--no-system-fonts"]).output().unwrap();
+    assert!(!bad.status.success());
+}
+
+#[test]
+fn set_text_needs_a_matching_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = sample(dir.path(), "page.psd", [0, 0, 0, 255]);
+    let out = psdc().arg(&input).args(["--set-text", "nope=hi", "--no-system-fonts"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no type layer named \"nope\""));
+    let list = psdc().arg(&input).arg("--list-text").output().unwrap();
+    assert!(list.status.success());
+    assert!(!dir.path().join("page.png").exists());
+}

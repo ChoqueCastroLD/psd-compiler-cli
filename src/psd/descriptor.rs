@@ -104,6 +104,46 @@ pub(crate) fn read(r: &mut Reader) -> Result<Descriptor> {
     Ok(Descriptor { class, items })
 }
 
+/// Copies the descriptor at `r`, replacing the tag and payload of each top-level item for which
+/// `with` returns bytes.
+pub(crate) fn splice(r: &mut Reader, with: impl Fn(&str) -> Option<Vec<u8>>) -> Result<Vec<u8>> {
+    let start = r.pos;
+    r.unicode()?;
+    key(r)?;
+    let count = r.u32()?;
+    let mut out = r.data[start..r.pos].to_vec();
+    for _ in 0..count {
+        let item = r.pos;
+        let k = key(r)?;
+        let body = r.pos;
+        let t = r.tag()?;
+        value(r, &t)?;
+        out.extend_from_slice(&r.data[item..body]);
+        match with(&k) {
+            Some(bytes) => out.extend_from_slice(&bytes),
+            None => out.extend_from_slice(&r.data[body..r.pos]),
+        }
+    }
+    Ok(out)
+}
+
+/// A `TEXT` item: tag, then the string in UTF-16 with a terminating NUL.
+pub(crate) fn text_item(s: &str) -> Vec<u8> {
+    let units: Vec<u16> = s.encode_utf16().chain([0]).collect();
+    let mut out = b"TEXT".to_vec();
+    out.extend_from_slice(&(units.len() as u32).to_be_bytes());
+    out.extend(units.iter().flat_map(|u| u.to_be_bytes()));
+    out
+}
+
+/// A `tdta` item: tag, then length-prefixed raw bytes.
+pub(crate) fn raw_item(data: &[u8]) -> Vec<u8> {
+    let mut out = b"tdta".to_vec();
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
 fn unit_name(tag: [u8; 4]) -> String {
     String::from_utf8_lossy(&tag).into_owned()
 }

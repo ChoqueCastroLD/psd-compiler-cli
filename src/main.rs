@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use psd_compiler::{png, render, Document, FontDb, RenderOptions};
+use psd_compiler::{png, render, Document, EncodeOptions, FontDb, Format, RenderOptions};
 use rayon::prelude::*;
 
 #[global_allocator]
@@ -12,7 +12,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const FONTS_ENV: &str = "PSDC_FONTS";
 
-/// Compile PSD/PSB files to PNG, re-rendering text layers with real fonts.
+/// Compile PSD/PSB files to PNG, JPEG, WebP, TIFF or AVIF, re-rendering text layers with real fonts.
 #[derive(Parser, Debug)]
 #[command(name = "psdc", version, about, after_help = AFTER_HELP)]
 struct Cli {
@@ -20,9 +20,30 @@ struct Cli {
     #[arg(required = true, value_name = "INPUT")]
     inputs: Vec<PathBuf>,
 
-    /// Output file (one input) or directory (several inputs). Defaults to INPUT with a .png extension.
+    /// Output file (one input) or directory (several inputs). Defaults to INPUT with the format's extension.
     #[arg(short, long, value_name = "PATH")]
     output: Option<PathBuf>,
+
+    /// Output format: png, jpg, webp, tif or avif. Defaults to the output file's extension, else png.
+    #[arg(short = 'F', long, value_name = "FORMAT", value_parser = parse_format)]
+    format: Option<Format>,
+
+    /// JPEG and AVIF quality, 1 to 100.
+    #[arg(short = 'Q', long, default_value_t = psd_compiler::DEFAULT_QUALITY, value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: u8,
+
+    /// Color that transparency is flattened onto for JPEG, as RRGGBB.
+    #[arg(long, value_name = "RRGGBB", default_value = "ffffff", value_parser = parse_color)]
+    background: [u8; 3],
+
+    /// Replace the text of the type layers named LAYER before rendering; repeatable. `\n` in TEXT
+    /// starts a new paragraph.
+    #[arg(long = "set-text", value_name = "LAYER=TEXT", value_parser = parse_set_text)]
+    set_text: Vec<(String, String)>,
+
+    /// List the type layers of each input (index, name and text) instead of compiling.
+    #[arg(long)]
+    list_text: bool,
 
     /// Font folder to search first; repeatable.
     #[arg(short, long = "fonts", value_name = "DIR")]
@@ -40,7 +61,7 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     text_masks: Option<PathBuf>,
 
-    /// PNG compression level, 0 (fastest) to 9 (smallest).
+    /// PNG and TIFF compression level, 0 (fastest) to 9 (smallest).
     #[arg(short, long, default_value_t = psd_compiler::DEFAULT_COMPRESSION, value_parser = clap::value_parser!(u8).range(0..=9))]
     compression: u8,
 
@@ -67,7 +88,25 @@ Fonts are looked up by PostScript name, in this order:
 Examples:
   psdc page.psd                      write page.png next to page.psd
   psdc page.psd -o out.png -f fonts  use ./fonts for missing typefaces
-  psdc chapter/*.psd -o rendered/    compile a batch in parallel";
+  psdc chapter/*.psd -o rendered/    compile a batch in parallel
+  psdc page.psd -o page.jpg -Q 85    write a JPEG
+  psdc page.psd --list-text          show the type layers
+  psdc page.psd --set-text 'Title=Hello\\nworld' -o hello.png";
+
+fn parse_format(s: &str) -> Result<Format, String> {
+    Format::from_extension(s).ok_or_else(|| format!("unknown format {s:?} (png, jpg, webp, tif, avif)"))
+}
+
+fn parse_color(s: &str) -> Result<[u8; 3], String> {
+    let hex = s.trim_start_matches('#');
+    let v = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6).ok_or_else(|| format!("{s:?} is not RRGGBB"))?;
+    Ok([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+fn parse_set_text(s: &str) -> Result<(String, String), String> {
+    let (layer, text) = s.split_once('=').ok_or("expected LAYER=TEXT")?;
+    Ok((layer.to_string(), text.replace("\\n", "\n")))
+}
 
 fn font_db(cli: &Cli) -> FontDb {
     let mut db = FontDb::default_cache_path().map(FontDb::with_cache).unwrap_or_default();
@@ -90,13 +129,32 @@ fn font_db(cli: &Cli) -> FontDb {
     db
 }
 
-fn output_for(cli: &Cli, input: &Path) -> PathBuf {
-    let png_name = || PathBuf::from(input.file_name().unwrap_or_default()).with_extension("png");
-    match &cli.output {
-        None => input.with_extension("png"),
-        Some(out) if cli.inputs.len() > 1 || out.is_dir() => out.join(png_name()),
-        Some(out) => out.clone(),
+/// The output path and format for `input`.
+fn output_for(cli: &Cli, input: &Path) -> Result<(PathBuf, Format)> {
+    let single = cli.output.as_ref().filter(|out| cli.inputs.len() == 1 && !out.is_dir());
+    let format = match (cli.format, single) {
+        (Some(f), _) => f,
+        (None, Some(out)) if out.extension().is_some() => Format::from_path(out)
+            .with_context(|| format!("unknown image format for {} (use png, jpg, webp, tif or avif)", out.display()))?,
+        _ => Format::Png,
+    };
+    let name = || PathBuf::from(input.file_name().unwrap_or_default()).with_extension(format.extension());
+    let path = match (&cli.output, single) {
+        (_, Some(out)) => out.clone(),
+        (Some(dir), None) => dir.join(name()),
+        (None, _) => input.with_extension(format.extension()),
+    };
+    Ok((path, format))
+}
+
+fn list_text(doc: &Document, input: &Path) {
+    let mut out = format!("{}\n", input.display());
+    for (i, l) in doc.layers.iter().enumerate() {
+        if let Some(text) = l.text() {
+            out += &format!("  {i:4}  {:?}  {:?}\n", l.name, text.replace('\r', "\n"));
+        }
     }
+    print!("{out}");
 }
 
 fn ms(t: Instant) -> f64 {
@@ -104,14 +162,25 @@ fn ms(t: Instant) -> f64 {
 }
 
 fn compile(cli: &Cli, fonts: &FontDb, input: &Path) -> Result<()> {
-    let output = output_for(cli, input);
+    let (output, format) = output_for(cli, input)?;
     let start = Instant::now();
-    let doc = Document::open(input).with_context(|| format!("cannot read {}", input.display()))?;
+    let mut doc = Document::open(input).with_context(|| format!("cannot read {}", input.display()))?;
+    if cli.list_text {
+        list_text(&doc, input);
+        return Ok(());
+    }
+    for (layer, text) in &cli.set_text {
+        if doc.set_text(layer, text).with_context(|| format!("cannot set the text of {layer:?}"))? == 0 {
+            bail!("{}: no type layer named {layer:?}", input.display());
+        }
+    }
     let parsed = ms(start);
     let options = RenderOptions { keep_text_raster: cli.keep_text, text_masks: cli.text_masks.is_some() };
     let rendered = render(&doc, fonts, &options);
     let drawn = ms(start);
-    rendered.image.save_png(&output, cli.compression).with_context(|| format!("cannot write {}", output.display()))?;
+    let encode = EncodeOptions { compression: cli.compression, quality: cli.quality, background: cli.background };
+    let bytes = rendered.image.encode(format, &encode).with_context(|| format!("cannot encode {}", output.display()))?;
+    std::fs::write(&output, bytes).with_context(|| format!("cannot write {}", output.display()))?;
     if let Some(dir) = &cli.text_masks {
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();
         for m in &rendered.text_masks {

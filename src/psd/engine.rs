@@ -7,6 +7,7 @@ use crate::error::{bail, Result};
 pub(crate) enum Node {
     Dict(Vec<(String, Node)>),
     Array(Vec<Node>),
+    Integer(i64),
     Number(f64),
     Bool(bool),
     String(String),
@@ -31,6 +32,7 @@ impl Node {
     pub fn num(&self) -> Option<f64> {
         match self {
             Node::Number(n) => Some(*n),
+            Node::Integer(i) => Some(*i as f64),
             Node::Bool(b) => Some(*b as u8 as f64),
             _ => None,
         }
@@ -40,8 +42,20 @@ impl Node {
         match self {
             Node::Bool(b) => Some(*b),
             Node::Number(n) => Some(*n != 0.0),
+            Node::Integer(i) => Some(*i != 0),
             _ => None,
         }
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Node> {
+        match self {
+            Node::Dict(v) => v.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    pub fn path_mut(&mut self, keys: &[&str]) -> Option<&mut Node> {
+        keys.iter().try_fold(self, |node, k| node.get_mut(k))
     }
 
     pub fn array(&self) -> &[Node] {
@@ -155,7 +169,13 @@ impl Parser<'_> {
                 Ok(match t {
                     b"true" => Node::Bool(true),
                     b"false" => Node::Bool(false),
-                    _ => Node::Number(std::str::from_utf8(t).ok().and_then(|s| s.parse().ok()).unwrap_or(0.0)),
+                    _ => {
+                        let s = std::str::from_utf8(t).unwrap_or("0");
+                        match s.parse::<i64>() {
+                            Ok(i) if !s.contains('.') => Node::Integer(i),
+                            _ => Node::Number(s.parse().unwrap_or(0.0)),
+                        }
+                    }
                 })
             }
         }
@@ -194,6 +214,66 @@ pub(crate) fn parse(data: &[u8]) -> Result<Node> {
     Parser { b: data, p: 0 }.value(0)
 }
 
+/// Serializes `node` the way Photoshop writes EngineData.
+pub(crate) fn write(node: &Node) -> Vec<u8> {
+    let mut out = b"\n\n".to_vec();
+    write_node(node, 0, &mut out);
+    out
+}
+
+fn write_node(node: &Node, depth: usize, out: &mut Vec<u8>) {
+    let tabs = |n: usize, out: &mut Vec<u8>| out.extend(std::iter::repeat_n(b'\t', n));
+    match node {
+        Node::Dict(entries) => {
+            out.extend_from_slice(b"<<\n");
+            for (k, v) in entries {
+                tabs(depth + 1, out);
+                out.push(b'/');
+                out.extend_from_slice(k.as_bytes());
+                if matches!(v, Node::Dict(_)) {
+                    out.push(b'\n');
+                    tabs(depth + 1, out);
+                } else {
+                    out.push(b' ');
+                }
+                write_node(v, depth + 1, out);
+                out.push(b'\n');
+            }
+            tabs(depth, out);
+            out.extend_from_slice(b">>");
+        }
+        Node::Array(items) => {
+            out.extend_from_slice(b"[");
+            for v in items {
+                out.push(b' ');
+                write_node(v, depth + 1, out);
+            }
+            out.extend_from_slice(b" ]");
+        }
+        Node::Integer(i) => out.extend_from_slice(i.to_string().as_bytes()),
+        Node::Number(n) => {
+            let s = if n.fract() == 0.0 && n.abs() < 1e15 { format!("{n:.1}") } else { format!("{n}") };
+            let s = s.replacen("0.", ".", usize::from(s.starts_with("0.") || s.starts_with("-0.")));
+            out.extend_from_slice(s.as_bytes());
+        }
+        Node::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Node::Name(n) => {
+            out.push(b'/');
+            out.extend_from_slice(n.as_bytes());
+        }
+        Node::String(s) => {
+            out.push(b'(');
+            for b in [0xFE, 0xFF].into_iter().chain(s.encode_utf16().flat_map(u16::to_be_bytes)) {
+                if matches!(b, b'(' | b')' | b'\\') {
+                    out.push(b'\\');
+                }
+                out.push(b);
+            }
+            out.push(b')');
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +296,16 @@ mod tests {
         src.extend_from_slice(&[0xFE, 0xFF, 0x00, b'a', 0x00, b'\\', b'(', 0x00, 0xF1]);
         src.extend_from_slice(b") >>");
         assert_eq!(parse(&src).unwrap().get("T").and_then(Node::str), Some("a(ñ"));
+    }
+
+    #[test]
+    fn writes_what_it_parses() {
+        let src = "<< /A 1.5 /B [ 1 2 .5 -0.25 ] /C true /D /Name /E << /F -3 /G 2.0 >> /T (x(y)\\z) >>";
+        let n = parse(src.as_bytes()).unwrap();
+        let out = write(&n);
+        assert_eq!(parse(&out).unwrap(), n);
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("/G 2.0") && text.contains("/F -3") && text.contains(" .5 -.25 "), "{text}");
     }
 
     #[test]
