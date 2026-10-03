@@ -1,21 +1,35 @@
 //! Layer tree compositing.
+//!
+//! The model follows the PDF transparency rules that Photoshop implements (and psd-tools ports):
+//! every group composites into a [`Comp`] that tracks the accumulated group alpha and shape next to
+//! the color, which is what knockout, pass-through groups and isolated adjustments need.
 
+pub(crate) mod adjust;
 pub(crate) mod canvas;
 pub(crate) mod distance;
 pub(crate) mod effects;
+pub(crate) mod fill;
 mod layer;
+pub(crate) mod mask;
+mod smart;
+pub(crate) mod vector;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
 use crate::blend::BlendMode;
+use crate::color::{self, ColorSpace};
 use crate::fonts::FontDb;
 use crate::image::Image;
-use crate::psd::{ColorMode, Document, LayerKind};
-use canvas::{Alpha, Canvas, Paint, Raster};
-use layer::{apply_mask, render_layer, LayerOutput};
+use crate::psd::descriptor;
+use crate::psd::{Document, Layer, LayerKind};
+use canvas::Raster;
+use effects::{Effects, Prepared};
+use layer::{coverage, layer_effects, render_layer, LayerOutput};
+use mask::Region;
 
 /// Options for [`render`].
 #[derive(Clone, Debug, Default)]
@@ -98,6 +112,14 @@ pub struct Rendered {
     pub text_masks: Vec<TextMask>,
 }
 
+/// What every layer renderer needs.
+pub(crate) struct Ctx<'a> {
+    pub doc: &'a Document,
+    pub fonts: &'a FontDb,
+    pub options: &'a RenderOptions,
+    pub cs: ColorSpace,
+}
+
 enum Node {
     Layer(usize),
     Group(usize, Vec<Node>),
@@ -142,88 +164,526 @@ fn visible_leaves(nodes: &[Node], doc: &Document, out: &mut Vec<usize>) {
     }
 }
 
-fn composite(nodes: &[Node], doc: &Document, outputs: &mut HashMap<usize, LayerOutput>, cv: &mut Canvas) {
-    let mut base: Option<Alpha> = None;
-    let mut base_visible = true;
-    for node in nodes {
-        let l = &doc.layers[node.index()];
-        if !l.clipping {
-            base_visible = !l.hidden;
-            base = None;
+type Rect = (i32, i32, i32, i32);
+
+fn union(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
+        (a, b) => a.or(b),
+    }
+}
+
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let r = (a.0.max(b.0), a.1.max(b.1), a.2.min(b.2), a.3.min(b.3));
+    (r.0 < r.2 && r.1 < r.3).then_some(r)
+}
+
+fn pad(r: Rect, p: i32) -> Rect {
+    (r.0 - p, r.1 - p, r.2 + p, r.3 + p)
+}
+
+fn raster_rect(r: &Raster) -> Rect {
+    (r.x, r.y, r.x + r.w as i32, r.y + r.h as i32)
+}
+
+fn ratio(v: u8) -> f32 {
+    v as f32 / 255.0
+}
+
+/// Knockout setting: 0 none, 1 shallow, 2 deep.
+fn knockout(l: &Layer) -> u8 {
+    l.block(b"knko").and_then(|b| b.first().copied()).unwrap_or(0).min(2)
+}
+
+/// Modes for which fill opacity fades the color toward the mode's neutral instead of thinning it.
+fn fill_neutral(mode: BlendMode) -> Option<f32> {
+    match mode {
+        BlendMode::ColorDodge | BlendMode::LinearDodge | BlendMode::Difference => Some(0.0),
+        BlendMode::ColorBurn | BlendMode::LinearBurn => Some(1.0),
+        BlendMode::VividLight | BlendMode::LinearLight | BlendMode::HardMix => Some(0.5),
+        _ => None,
+    }
+}
+
+/// A compositing context: one group being painted over its backdrop.
+struct Comp {
+    /// Premultiplied result so far.
+    cv: Raster,
+    /// Group alpha: everything painted in this context, without the backdrop.
+    ga: Vec<f32>,
+    /// Group shape.
+    sg: Vec<f32>,
+    /// The backdrop the context started from; transparent when `None`.
+    init: Option<Raster>,
+    /// What deep knockout reveals (the Background layer); the initial backdrop when `None`.
+    deep: Option<Arc<Raster>>,
+    /// Adjustments only affect what this context painted.
+    adjust_isolated: bool,
+}
+
+impl Comp {
+    fn new(r: Rect, init: Option<Raster>, deep: Option<Arc<Raster>>, adjust_isolated: bool) -> Comp {
+        let (w, h) = ((r.2 - r.0) as usize, (r.3 - r.1) as usize);
+        let cv = match &init {
+            Some(i) if raster_rect(i) == r => i.clone(),
+            Some(i) => i.crop(r.0, r.1, w, h),
+            None => Raster::new(r.0, r.1, w, h),
+        };
+        let init = init.map(|_| cv.clone());
+        Comp { ga: vec![0.0; w * h], sg: vec![0.0; w * h], cv, init, deep, adjust_isolated }
+    }
+
+    fn rect(&self) -> Rect {
+        raster_rect(&self.cv)
+    }
+
+    fn at(&self, x: i32, y: i32) -> usize {
+        (y - self.cv.y) as usize * self.cv.w + (x - self.cv.x) as usize
+    }
+
+    /// Paints `src` (premultiplied) with `mode`. `shape` is the coverage over `src`'s rectangle,
+    /// its alpha when `None`.
+    fn paint(&mut self, src: &Raster, shape: Option<&[f32]>, mode: BlendMode, knock: u8) {
+        let Some((x0, y0, x1, y1)) = intersect(self.rect(), raster_rect(src)) else { return };
+        let shape_at = |x: i32, y: i32| {
+            let j = (y - src.y) as usize * src.w + (x - src.x) as usize;
+            shape.map_or(src.px[j * 4 + 3], |s| s[j])
+        };
+        if knock == 0 {
+            self.cv.paint(src, mode, 1.0, Some(&mut self.ga));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (i, s) = (self.at(x, y), shape_at(x, y));
+                    self.sg[i] = s + self.sg[i] * (1.0 - s);
+                }
+            }
+            return;
         }
-        if l.hidden || (l.clipping && (!base_visible || base.is_none())) {
-            continue;
+        let backdrop = if knock == 2 { self.deep.as_deref().or(self.init.as_ref()) } else { self.init.as_ref() };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = self.at(x, y);
+                let shape = shape_at(x, y);
+                if shape <= 0.0 {
+                    continue;
+                }
+                let s = &src.px[src.index(x, y)..][..4];
+                let a_s = s[3].min(shape);
+                let cs = if s[3] > 0.0 { [s[0] / s[3], s[1] / s[3], s[2] / s[3]] } else { [0.0; 3] };
+                let ko = backdrop.filter(|b| b.contains(x, y)).map_or([0.0; 4], |b| {
+                    let k = b.index(x, y);
+                    [b.px[k], b.px[k + 1], b.px[k + 2], b.px[k + 3]]
+                });
+                let a_ko = ko[3];
+                let c_ko = if a_ko > 0.0 { [ko[0] / a_ko, ko[1] / a_ko, ko[2] / a_ko] } else { [0.0; 3] };
+                let mixed = if mode.is_normal() { cs } else { mode.apply(c_ko, cs) };
+                let a0 = self.init.as_ref().map_or(0.0, |r| r.px[i * 4 + 3]);
+                let ga = (1.0 - shape) * self.ga[i] + (shape - a_s) * a_ko + a_s;
+                let alpha = a0 + ga - a0 * ga;
+                let p = &mut self.cv.px[i * 4..i * 4 + 4];
+                for c in 0..3 {
+                    let numer = (1.0 - shape) * p[c]
+                        + (shape - a_s) * ko[c]
+                        + a_s * ((1.0 - a_ko) * cs[c] + a_ko * mixed[c]);
+                    p[c] = if alpha > 1e-6 { (numer / alpha).clamp(0.0, 1.0) * alpha } else { 0.0 };
+                }
+                p[3] = alpha;
+                self.ga[i] = ga;
+                self.sg[i] = shape + self.sg[i] * (1.0 - shape);
+            }
         }
-        let opacity = l.opacity as f32 / 255.0;
+    }
+
+    fn weight<'a>(&'a self, w: impl Fn(i32, i32) -> f32 + Sync + 'a) -> impl Fn(i32, i32) -> f32 + Sync + 'a {
+        move |x, y| if self.adjust_isolated { w(x, y) * self.sg[self.at(x, y)] } else { w(x, y) }
+    }
+
+    fn adjust(&mut self, f: &(dyn Fn([f32; 3]) -> [f32; 3] + Sync), mode: BlendMode, w: impl Fn(i32, i32) -> f32 + Sync) {
+        let mut cv = std::mem::take(&mut self.cv);
+        cv.adjust(f, mode, self.weight(w));
+        self.cv = cv;
+    }
+
+    /// Like [`Comp::adjust`] with a precomputed adjusted image `target`.
+    fn adjust_to(&mut self, target: &Raster, mode: BlendMode, w: impl Fn(i32, i32) -> f32 + Sync) {
+        let (x0, y0, cw) = (self.cv.x, self.cv.y, self.cv.w);
+        let mut px = std::mem::take(&mut self.cv.px);
+        let weight = self.weight(w);
+        for (i, p) in px.chunks_exact_mut(4).enumerate() {
+            let a = p[3];
+            if a <= 0.0 {
+                continue;
+            }
+            let (x, y) = (x0 + (i % cw) as i32, y0 + (i / cw) as i32);
+            let k = weight(x, y);
+            let t = &target.px[target.index(x, y)..][..4];
+            if k <= 0.0 || t[3] <= 0.0 {
+                continue;
+            }
+            let c = [p[0] / a, p[1] / a, p[2] / a].map(|v| v.clamp(0.0, 1.0));
+            let t = [t[0] / t[3], t[1] / t[3], t[2] / t[3]].map(|v| v.clamp(0.0, 1.0));
+            let t = if mode.is_normal() { t } else { mode.apply(c, t) };
+            for ch in 0..3 {
+                p[ch] = (c[ch] + (t[ch] - c[ch]) * k) * a;
+            }
+        }
+        drop(weight);
+        self.cv.px = px;
+    }
+}
+
+struct Compositor<'a> {
+    ctx: &'a Ctx<'a>,
+    outputs: HashMap<usize, LayerOutput>,
+    warnings: Vec<Warning>,
+}
+
+impl Compositor<'_> {
+    fn layer(&self, n: &Node) -> &Layer {
+        &self.ctx.doc.layers[n.index()]
+    }
+
+    fn composite(&mut self, nodes: &[Node], comp: &mut Comp, clipping: bool) {
+        let mut i = 0;
+        while i < nodes.len() {
+            let mut j = i + 1;
+            while clipping && j < nodes.len() && self.layer(&nodes[j]).clipping {
+                j += 1;
+            }
+            let (base, clips) = (&nodes[i], &nodes[i + 1..j]);
+            i = j;
+            if self.layer(base).hidden {
+                continue;
+            }
+            let clips: Vec<&Node> = clips.iter().filter(|c| !self.layer(c).hidden).collect();
+            self.draw(base, &clips, comp);
+        }
+    }
+
+    fn composite_refs(&mut self, nodes: &[&Node], comp: &mut Comp) {
+        for n in nodes {
+            self.draw(n, &[], comp);
+        }
+    }
+
+    fn draw(&mut self, node: &Node, clips: &[&Node], comp: &mut Comp) {
+        let doc = self.ctx.doc;
         match node {
             Node::Layer(i) => {
-                let Some(mut out) = outputs.remove(i) else { continue };
-                if !l.clipping {
-                    base = Some(out.base.take().unwrap_or_default());
-                }
-                let clip = if l.clipping { base.as_ref() } else { None };
-                for p in &out.paints {
-                    cv.paint(p, opacity, clip);
+                let l = &doc.layers[*i];
+                let Some(out) = self.outputs.remove(i) else { return };
+                if let Some(f) = &out.adjust {
+                    self.draw_adjustment(l, f, &out.mask, clips, comp);
+                } else if let Some(content) = out.content {
+                    let source = Source { content, coverage: out.coverage, effects: out.effects, prepared: out.prepared };
+                    self.draw_source(l, l.blend_mode, source, clips, comp);
                 }
             }
+            Node::Group(i, children) => self.draw_group(*i, children, clips, comp),
+        }
+    }
+
+    fn draw_adjustment(&mut self, l: &Layer, f: &adjust::ColorFn, mask: &Region, clips: &[&Node], comp: &mut Comp) {
+        let o = ratio(l.opacity) * ratio(l.fill_opacity);
+        let w = |x: i32, y: i32| mask.at(x, y) * o;
+        if clips.is_empty() {
+            comp.adjust(f.as_ref(), l.blend_mode, w);
+            return;
+        }
+        let mut target = comp.cv.clone();
+        target.adjust(f.as_ref(), BlendMode::Normal, |_, _| 1.0);
+        let mut sub = Comp::new(comp.rect(), Some(target), None, false);
+        self.composite_refs(clips, &mut sub);
+        comp.adjust_to(&sub.cv, l.blend_mode, w);
+    }
+
+    /// Bounds of what `node` paints, if anything.
+    fn extent(&self, node: &Node) -> Option<Rect> {
+        let l = self.layer(node);
+        if l.hidden {
+            return None;
+        }
+        match node {
+            Node::Layer(i) => self.outputs.get(i).and_then(|o| o.content.as_ref()).map(raster_rect),
             Node::Group(_, children) => {
-                let pass_through = l.blend_mode == BlendMode::PassThrough;
-                if pass_through && opacity >= 1.0 && l.mask.is_none() && !l.clipping {
-                    let before = cv.alpha();
-                    composite(children, doc, outputs, cv);
-                    let added = cv.alpha().iter().zip(&before).map(|(a, b)| (a - b).max(0.0)).collect();
-                    base = Some(Alpha { x: 0, y: 0, w: cv.w, h: cv.h, a: added });
-                } else {
-                    let mut sub = Canvas::new(cv.w, cv.h);
-                    composite(children, doc, outputs, &mut sub);
-                    let mut raster = Raster { x: 0, y: 0, w: cv.w, h: cv.h, px: sub.px };
-                    apply_mask(&mut raster, l);
-                    if !l.clipping {
-                        base = Some(Alpha::of(&raster));
+                let inner = children.iter().fold(None, |acc, c| union(acc, self.extent(c)));
+                let reach = layer_effects(self.ctx.doc, &self.ctx.cs, l).reach().ceil() as i32;
+                inner.map(|r| pad(r, reach))
+            }
+        }
+    }
+
+    fn draw_group(&mut self, index: usize, children: &[Node], clips: &[&Node], comp: &mut Comp) {
+        let (doc, cs) = (self.ctx.doc, &self.ctx.cs);
+        let l = &doc.layers[index];
+        let effects = layer_effects(doc, cs, l);
+        let mask = mask::region(doc, l, true);
+        let (o, f) = (ratio(l.opacity), ratio(l.fill_opacity));
+        let reach = effects.reach().ceil() as i32;
+        let artboard = artboard(doc, l, cs);
+        let pass_through = l.blend_mode == BlendMode::PassThrough && artboard.is_none();
+        if pass_through {
+            let knocks = children.iter().any(|c| knockout(self.layer(c)) > 0);
+            if o >= 1.0 && f >= 1.0 && mask.is_empty() && clips.is_empty() && effects.is_empty() && !knocks {
+                self.composite(children, comp, true);
+                return;
+            }
+            let isolate = f < 1.0 || !clips.is_empty() || !effects.is_empty();
+            let mut sub = Comp::new(comp.rect(), Some(comp.cv.clone()), comp.deep.clone(), comp.adjust_isolated || isolate);
+            self.composite(children, &mut sub, true);
+            if !isolate {
+                let m = |x: i32, y: i32| mask.at(x, y) * o;
+                comp.cv.lerp_to(&sub.cv, m);
+                let (x0, y0, w) = (comp.cv.x, comp.cv.y, comp.cv.w);
+                for (i, (g, s)) in comp.ga.iter_mut().zip(comp.sg.iter_mut()).enumerate() {
+                    let k = m(x0 + (i % w) as i32, y0 + (i / w) as i32);
+                    let (a, b) = (k * sub.ga[i], k * sub.sg[i]);
+                    *g = a + *g * (1.0 - a);
+                    *s = b + *s * (1.0 - b);
+                }
+                return;
+            }
+            // Take the backdrop back out: what the group added, as a source of its own.
+            let mut content = sub.cv;
+            for (i, p) in content.px.chunks_exact_mut(4).enumerate() {
+                let g = sub.ga[i];
+                let b = &comp.cv.px[i * 4..i * 4 + 4];
+                for c in 0..3 {
+                    p[c] = (p[c] - (1.0 - g) * b[c]).clamp(0.0, g);
+                }
+                p[3] = g;
+            }
+            let content = self.trim(content, reach);
+            let source = Source::new(content, mask, effects);
+            self.draw_source(l, BlendMode::Normal, source, clips, comp);
+            return;
+        }
+        let canvas = pad(comp.rect(), reach);
+        let rect = match &artboard {
+            Some((r, _)) => intersect(*r, canvas),
+            None => {
+                let inner = children.iter().fold(None, |acc, c| union(acc, self.extent(c)));
+                inner.and_then(|r| intersect(pad(r, reach), canvas))
+            }
+        };
+        let Some(rect) = rect else {
+            self.skip(children);
+            return;
+        };
+        let init = artboard.and_then(|(r, bg)| {
+            let (w, h) = ((rect.2 - rect.0) as usize, (rect.3 - rect.1) as usize);
+            let _ = r;
+            bg.map(|c| Raster::solid(rect.0, rect.1, w, h, &vec![1.0; w * h], c))
+        });
+        let mut sub = Comp::new(rect, init, None, false);
+        self.composite(children, &mut sub, true);
+        let mode = if l.blend_mode == BlendMode::PassThrough { BlendMode::Normal } else { l.blend_mode };
+        let source = Source::new(sub.cv, mask, effects);
+        self.draw_source(l, mode, source, clips, comp);
+    }
+
+    /// Drops the transparent border of a group result, keeping `reach` pixels for its effects.
+    fn trim(&self, r: Raster, reach: i32) -> Raster {
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for (i, p) in r.px.chunks_exact(4).enumerate() {
+            if p[3] > 0.0 {
+                let (x, y) = (i % r.w, i / r.w);
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+        if x0 >= x1 {
+            return Raster::new(r.x, r.y, 0, 0);
+        }
+        let b = pad((r.x + x0 as i32, r.y + y0 as i32, r.x + x1 as i32, r.y + y1 as i32), reach);
+        r.crop(b.0, b.1, (b.2 - b.0) as usize, (b.3 - b.1) as usize)
+    }
+
+    fn skip(&mut self, nodes: &[Node]) {
+        for n in nodes {
+            match n {
+                Node::Layer(i) => {
+                    self.outputs.remove(i);
+                }
+                Node::Group(_, c) => self.skip(c),
+            }
+        }
+    }
+
+    /// Composites one source: a layer's content or a group's result, with its clipped layers,
+    /// mask and effects.
+    fn draw_source(&mut self, l: &Layer, mode: BlendMode, mut s: Source, clips: &[&Node], comp: &mut Comp) {
+        if s.content.w == 0 || s.content.h == 0 {
+            self.skip_refs(clips);
+            return;
+        }
+        if !clips.is_empty() {
+            let c = &s.content;
+            let mut sub = Comp::new(raster_rect(c), Some(c.clone()), None, false);
+            self.composite_refs(clips, &mut sub);
+            for (p, q) in s.content.px.chunks_exact_mut(4).zip(sub.cv.px.chunks_exact(4)) {
+                let raw = p[3];
+                if raw > 0.0 && q[3] > 0.0 {
+                    for ch in 0..3 {
+                        p[ch] = (q[ch] / q[3]).clamp(0.0, 1.0) * raw;
                     }
-                    let clip = if l.clipping { base.as_ref() } else { None };
-                    let mode = if pass_through { BlendMode::Normal } else { l.blend_mode };
-                    cv.paint(&Paint { raster, mode, opacity }, 1.0, clip);
                 }
             }
+        }
+        let (o, mut f) = (ratio(l.opacity), ratio(l.fill_opacity));
+        let c = &s.content;
+        let rect = (c.x, c.y, c.w, c.h);
+        if s.prepared.is_empty() && !s.effects.is_empty() {
+            let b = &l.bounds;
+            let bounds = if b.width() > 0 && l.kind != LayerKind::Group {
+                [b.left as f64, b.top as f64, b.right as f64, b.bottom as f64]
+            } else {
+                alpha_bounds(c)
+            };
+            s.prepared = s.effects.prepare(self.ctx.doc, &s.coverage, None, rect, f, bounds);
+        }
+        for e in &s.prepared.below {
+            comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, None), None, e.mode, 0);
+        }
+        for e in &s.prepared.beside {
+            comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, Some(&s.coverage)), None, e.mode, 0);
+        }
+        if let Some(neutral) = fill_neutral(mode).filter(|_| f < 1.0) {
+            for p in s.content.px.chunks_exact_mut(4) {
+                let a = p[3];
+                for ch in 0..3 {
+                    p[ch] = (neutral + f * (p[ch] / a.max(1e-6) - neutral)) * a;
+                }
+            }
+            f = 1.0;
+        }
+        let mut body = effects::assemble(&s.content, &s.coverage, f, o, &s.prepared.inner);
+        if mode == BlendMode::Dissolve {
+            dissolve(&mut body);
+        }
+        comp.paint(&body, Some(&s.coverage), mode, knockout(l));
+    }
+
+    fn skip_refs(&mut self, nodes: &[&Node]) {
+        for n in nodes {
+            self.skip(std::slice::from_ref(*n));
         }
     }
 }
 
-fn composite_image(doc: &Document, cv: &mut Canvas) {
-    let get = |c: usize, i: usize| doc.composite.get(c).and_then(|v| v.get(i)).copied().unwrap_or(255) as f32 / 255.0;
-    let extra = |n: u16, i: usize| if doc.channel_count > n { get(n as usize, i) } else { 1.0 };
-    for (i, p) in cv.px.chunks_exact_mut(4).enumerate() {
-        let (rgb, a) = match doc.color_mode {
-            ColorMode::Grayscale | ColorMode::Bitmap => ([get(0, i); 3], extra(1, i)),
-            ColorMode::Cmyk => {
-                let k = get(3, i);
-                ([get(0, i) * k, get(1, i) * k, get(2, i) * k], 1.0)
-            }
-            _ => ([get(0, i), get(1, i), get(2, i)], extra(3, i)),
-        };
-        p.copy_from_slice(&[rgb[0] * a, rgb[1] * a, rgb[2] * a, a]);
+/// Dissolve: each pixel is either fully painted or not, with its alpha as the probability.
+fn dissolve(r: &mut Raster) {
+    for (i, p) in r.px.chunks_exact_mut(4).enumerate() {
+        let a = p[3];
+        if a <= 0.0 || a >= 1.0 {
+            continue;
+        }
+        let (x, y) = ((r.x + (i % r.w) as i32) as u32, (r.y + (i / r.w) as i32) as u32);
+        let mut h = x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        let k = if (h & 0xFFFF) as f32 / 65536.0 < a { 1.0 / a } else { 0.0 };
+        p.iter_mut().for_each(|c| *c *= k);
     }
+}
+
+struct Source {
+    content: Raster,
+    coverage: Vec<f32>,
+    effects: Effects,
+    prepared: Prepared,
+}
+
+impl Source {
+    fn new(content: Raster, mask: Region, effects: Effects) -> Source {
+        let coverage = coverage(&content, &mask);
+        Source { content, coverage, effects, prepared: Prepared::default() }
+    }
+}
+
+fn alpha_bounds(r: &Raster) -> [f64; 4] {
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for (i, p) in r.px.chunks_exact(4).enumerate() {
+        if p[3] > 0.0 {
+            let (x, y) = ((r.x + (i % r.w) as i32) as f64, (r.y + (i / r.w) as i32) as f64);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1.0), y1.max(y + 1.0));
+        }
+    }
+    if x0 > x1 {
+        [r.x as f64, r.y as f64, (r.x + r.w as i32) as f64, (r.y + r.h as i32) as f64]
+    } else {
+        [x0, y0, x1, y1]
+    }
+}
+
+/// The frame and background color of an artboard group.
+fn artboard(doc: &Document, l: &Layer, cs: &ColorSpace) -> Option<(Rect, Option<[f32; 3]>)> {
+    let d = [b"artb", b"artd", b"abdd"]
+        .iter()
+        .filter_map(|k| l.block(k))
+        .filter_map(|b| descriptor::parse_block(b, 4).ok())
+        .last()?;
+    let r = d.desc("artboardRect")?;
+    let v = |k: &str| r.num(k).unwrap_or(0.0).round() as i32;
+    let rect = (v("Left"), v("Top "), v("Rght"), v("Btom"));
+    if rect.2 <= rect.0 || rect.3 <= rect.1 {
+        return None;
+    }
+    let bg = match d.num("artboardBackgroundType").unwrap_or(1.0) as i32 {
+        1 => Some([1.0; 3]),
+        2 => Some([0.0; 3]),
+        4 => d.desc("Clr ").and_then(|c| color::from_object(c, cs)),
+        _ => None,
+    };
+    let _ = doc;
+    Some((rect, bg))
+}
+
+/// The Background layer's pixels, for deep knockout.
+fn background(ctx: &Ctx, tree: &[Node]) -> Option<Arc<Raster>> {
+    let Node::Layer(i) = tree.first()? else { return None };
+    let l = &ctx.doc.layers[*i];
+    if l.kind != LayerKind::Pixel || l.channels.contains_key(&-1) {
+        return None;
+    }
+    layer::pixel_raster(ctx.doc, &ctx.cs, l).map(Arc::new)
+}
+
+fn composite_image(ctx: &Ctx) -> Raster {
+    let doc = ctx.doc;
+    let (w, h) = (doc.width as usize, doc.height as usize);
+    let mut r = Raster::new(0, 0, w, h);
+    let n = w * h;
+    let ch = |c: usize| doc.composite.get(c).filter(|v| v.len() >= n).map(Vec::as_slice);
+    let colors = doc.color_mode.channels().min(4);
+    let alpha = match doc.color_mode {
+        crate::psd::ColorMode::Cmyk | crate::psd::ColorMode::Multichannel | crate::psd::ColorMode::Indexed => None,
+        _ if doc.channel_count as usize > colors => ch(colors),
+        _ => None,
+    };
+    let channels = [0, 1, 2, 3].map(|c| if c < colors { ch(c) } else { None });
+    r.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        let s = |c| layer::row(c, y, w);
+        layer::decode_row(doc, &ctx.cs, channels.map(s), s(alpha), w, row);
+    });
+    r
 }
 
 /// Flattens `doc` into an image, re-rendering type layers with `fonts`.
 ///
 /// Leaf layers render in parallel on the current rayon pool; compositing then follows the layer tree.
 pub fn render(doc: &Document, fonts: &FontDb, options: &RenderOptions) -> Rendered {
+    let ctx = Ctx { doc, fonts, options, cs: ColorSpace::new(doc) };
     let (w, h) = (doc.width as usize, doc.height as usize);
-    let mut cv = Canvas::new(w, h);
     let mut warnings = vec![];
     let mut text_masks = vec![];
-    if doc.layers.is_empty() {
-        composite_image(doc, &mut cv);
+    let cv = if doc.layers.is_empty() {
+        composite_image(&ctx)
     } else {
         let tree = build_tree(doc);
         let mut leaves = vec![];
         visible_leaves(&tree, doc, &mut leaves);
-        let results: Vec<(usize, LayerOutput)> = leaves
-            .par_iter()
-            .map(|&i| (i, render_layer(doc, i, fonts, options.keep_text_raster, options.text_masks)))
-            .collect();
+        let results: Vec<(usize, LayerOutput)> = leaves.par_iter().map(|&i| (i, render_layer(&ctx, i))).collect();
         let mut outputs = HashMap::with_capacity(results.len());
         for (i, mut out) in results {
             let name = &doc.layers[i].name;
@@ -231,12 +691,16 @@ pub fn render(doc: &Document, fonts: &FontDb, options: &RenderOptions) -> Render
             text_masks.extend(out.text_mask.take());
             outputs.insert(i, out);
         }
-        composite(&tree, doc, &mut outputs, &mut cv);
-    }
-    if doc.color_mode == ColorMode::Indexed {
-        warnings.push(Warning { layer: None, message: "indexed color is rendered without its palette".into() });
-    }
-    Rendered { image: Image::from_premultiplied(doc.width, doc.height, &cv.px), warnings, text_masks }
+        let deep = background(&ctx, &tree);
+        let mut comp = Comp::new((0, 0, w as i32, h as i32), None, deep, false);
+        let mut c = Compositor { ctx: &ctx, outputs, warnings: vec![] };
+        c.composite(&tree, &mut comp, true);
+        warnings.append(&mut c.warnings);
+        comp.cv
+    };
+    let mut image = Image::from_premultiplied(doc.width, doc.height, &cv.px);
+    ctx.cs.finish(&mut image.data);
+    Rendered { image, warnings, text_masks }
 }
 
 #[cfg(test)]
@@ -257,5 +721,32 @@ mod tests {
         let w = Warning { layer: Some("Title".into()), message: "font X not found".into() };
         assert_eq!(w.to_string(), "layer \"Title\": font X not found");
         assert_eq!(Warning { layer: None, message: "m".into() }.to_string(), "m");
+    }
+
+    fn solid(x: i32, y: i32, w: usize, h: usize, rgba: [f32; 4]) -> Raster {
+        let a = rgba[3];
+        Raster { x, y, w, h, px: [rgba[0] * a, rgba[1] * a, rgba[2] * a, a].repeat(w * h) }
+    }
+
+    #[test]
+    fn knockout_reveals_the_initial_backdrop() {
+        let backdrop = solid(0, 0, 1, 1, [0.0, 0.0, 1.0, 1.0]);
+        let mut c = Comp::new((0, 0, 1, 1), Some(backdrop), None, false);
+        c.paint(&solid(0, 0, 1, 1, [1.0, 0.0, 0.0, 1.0]), None, BlendMode::Normal, 0);
+        // Fill 0 with full shape: a hole down to the backdrop.
+        c.paint(&solid(0, 0, 1, 1, [0.0, 1.0, 0.0, 0.0]), Some(&[1.0]), BlendMode::Normal, 1);
+        assert_eq!(c.cv.px, [0.0, 0.0, 1.0, 1.0]);
+        let mut t = Comp::new((0, 0, 1, 1), None, None, false);
+        t.paint(&solid(0, 0, 1, 1, [1.0, 0.0, 0.0, 1.0]), None, BlendMode::Normal, 0);
+        t.paint(&solid(0, 0, 1, 1, [0.0, 1.0, 0.0, 0.5]), Some(&[1.0]), BlendMode::Normal, 2);
+        assert_eq!(t.cv.px, [0.0, 0.5, 0.0, 0.5]);
+    }
+
+    #[test]
+    fn isolated_adjustments_follow_group_shape() {
+        let mut c = Comp::new((0, 0, 2, 1), Some(solid(0, 0, 2, 1, [1.0, 1.0, 1.0, 1.0])), None, true);
+        c.paint(&solid(0, 0, 1, 1, [1.0, 1.0, 1.0, 1.0]), None, BlendMode::Normal, 0);
+        c.adjust(&|c| c.map(|v| 1.0 - v), BlendMode::Normal, |_, _| 1.0);
+        assert_eq!(c.cv.px, [0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     }
 }

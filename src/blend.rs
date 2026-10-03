@@ -96,15 +96,19 @@ impl BlendMode {
                 let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { b.sqrt() };
                 b + (2.0 * s - 1.0) * (d - b)
             }
-            VividLight if s <= 0.5 => ColorBurn.separable(b, 2.0 * s),
-            VividLight => ColorDodge.separable(b, 2.0 * s - 1.0),
+            // Inside vivid light the source extremes win over the backdrop special cases.
+            VividLight if s <= 0.0 => 0.0,
+            VividLight if s >= 1.0 => 1.0,
+            VividLight if s <= 0.5 => 1.0 - ((1.0 - b) / (2.0 * s)).min(1.0),
+            VividLight => (b / (2.0 * (1.0 - s))).min(1.0),
             LinearLight => (b + 2.0 * s - 1.0).clamp(0.0, 1.0),
             PinLight if s <= 0.5 => b.min(2.0 * s),
             PinLight => b.max(2.0 * s - 1.0),
-            HardMix => (b + s >= 1.0) as u8 as f32,
+            HardMix => (b + s > 1.0 || (b + s == 1.0 && b > 0.5)) as u8 as f32,
             Difference => (b - s).abs(),
             Exclusion => b + s - 2.0 * b * s,
             Subtract => (b - s).max(0.0),
+            Divide if b <= 0.0 => 0.0,
             Divide if s <= 0.0 => 1.0,
             Divide => (b / s).min(1.0),
             _ => s,
@@ -128,7 +132,7 @@ impl BlendMode {
     }
 }
 
-fn lum(c: [f32; 3]) -> f32 {
+pub(crate) fn lum(c: [f32; 3]) -> f32 {
     0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
 }
 
@@ -146,7 +150,7 @@ fn clip_color(c: [f32; 3]) -> [f32; 3] {
     o
 }
 
-fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+pub(crate) fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
     let d = l - lum(c);
     clip_color(c.map(|v| v + d))
 }
@@ -197,7 +201,7 @@ mod tests {
         assert!(close(Overlay.apply(b, s), b));
         assert!(close(HardLight.apply(b, s), b));
         assert!(close(SoftLight.apply(b, s), b));
-        assert!(close(HardMix.apply(b, s), [0.0, 1.0, 1.0]));
+        assert!(close(HardMix.apply(b, s), [0.0, 0.0, 1.0]));
     }
 
     #[test]

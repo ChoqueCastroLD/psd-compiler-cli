@@ -64,6 +64,21 @@ pub(crate) fn unpredict(data: &mut [u8], width: usize, depth: u16) {
                 }
             }
         }
+        32 => {
+            let n = width * 4;
+            let mut planes = vec![0u8; n];
+            for row in data.chunks_exact_mut(n) {
+                for x in 1..n {
+                    row[x] = row[x].wrapping_add(row[x - 1]);
+                }
+                planes.copy_from_slice(row);
+                for x in 0..width {
+                    for b in 0..4 {
+                        row[x * 4 + b] = planes[b * width + x];
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -77,15 +92,18 @@ fn row_bytes(width: usize, depth: u16) -> usize {
 }
 
 /// Converts raw samples of any supported depth to 8 bits per sample.
-pub(crate) fn to_8bit(raw: Vec<u8>, width: usize, height: usize, depth: u16) -> Result<Vec<u8>> {
+///
+/// 32-bit color is linear light and gets the sRGB curve; `linear` channels (alpha, masks) do not.
+pub(crate) fn to_8bit(raw: Vec<u8>, width: usize, height: usize, depth: u16, linear: bool) -> Result<Vec<u8>> {
     Ok(match depth {
         8 => raw,
-        16 => raw.chunks_exact(2).map(|c| c[0]).collect(),
+        16 => raw.chunks_exact(2).map(|c| ((u16::from_be_bytes([c[0], c[1]]) as u32 * 255 + 32767) / 65535) as u8).collect(),
         32 => raw
             .chunks_exact(4)
             .map(|c| {
-                let linear = f32::from_be_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0);
-                (linear.powf(1.0 / 2.2) * 255.0 + 0.5) as u8
+                let v = f32::from_be_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0);
+                let v = if linear { v } else { crate::color::srgb_encode(v as f64) as f32 };
+                (v * 255.0 + 0.5) as u8
             })
             .collect(),
         1 => {
@@ -111,6 +129,7 @@ pub(crate) fn decode_channel(
     height: usize,
     depth: u16,
     end: usize,
+    linear: bool,
 ) -> Result<Vec<u8>> {
     let stride = row_bytes(width, depth);
     let size = stride * height;
@@ -138,7 +157,7 @@ pub(crate) fn decode_channel(
         }
     }
     raw.resize(size, 0);
-    to_8bit(raw, width, height, depth)
+    to_8bit(raw, width, height, depth, linear)
 }
 
 #[cfg(test)]
@@ -186,11 +205,30 @@ mod tests {
     }
 
     #[test]
+    fn unpredicts_32_bit_byte_planes() {
+        let values = [0.5f32, 1.0];
+        let mut planes = vec![0u8; 8];
+        for (x, v) in values.iter().enumerate() {
+            for (b, byte) in v.to_be_bytes().iter().enumerate() {
+                planes[b * 2 + x] = *byte;
+            }
+        }
+        let mut deltas = planes.clone();
+        for x in (1..8).rev() {
+            deltas[x] = planes[x].wrapping_sub(planes[x - 1]);
+        }
+        unpredict(&mut deltas, 2, 32);
+        assert_eq!(&deltas[..4], 0.5f32.to_be_bytes());
+        assert_eq!(&deltas[4..], 1.0f32.to_be_bytes());
+    }
+
+    #[test]
     fn converts_depths_to_8bit() {
-        assert_eq!(to_8bit(vec![0xAB, 0xCD], 1, 1, 16).unwrap(), [0xAB]);
-        assert_eq!(to_8bit(1.0f32.to_be_bytes().to_vec(), 1, 1, 32).unwrap(), [255]);
-        assert_eq!(to_8bit(vec![0b1010_0000], 3, 1, 1).unwrap(), [0, 255, 0]);
-        assert!(to_8bit(vec![], 0, 0, 7).is_err());
+        assert_eq!(to_8bit(vec![0xAB, 0xCD], 1, 1, 16, false).unwrap(), [0xAB]);
+        assert_eq!(to_8bit(1.0f32.to_be_bytes().to_vec(), 1, 1, 32, false).unwrap(), [255]);
+        assert_eq!(to_8bit(0.25f32.to_be_bytes().to_vec(), 1, 1, 32, true).unwrap(), [64]);
+        assert_eq!(to_8bit(vec![0b1010_0000], 3, 1, 1, false).unwrap(), [0, 255, 0]);
+        assert!(to_8bit(vec![], 0, 0, 7, false).is_err());
     }
 
     #[test]
@@ -201,7 +239,7 @@ mod tests {
         enc.write_all(&[5, 1, 1, 7, 0, 0]).unwrap();
         let data = enc.finish().unwrap();
         let mut r = Reader::new(&data);
-        let out = decode_channel(&mut r, Compression::ZipPredicted, 3, 2, 8, data.len()).unwrap();
+        let out = decode_channel(&mut r, Compression::ZipPredicted, 3, 2, 8, data.len(), false).unwrap();
         assert_eq!(out, [5, 6, 7, 7, 7, 7]);
     }
 

@@ -24,6 +24,7 @@
 #![warn(missing_docs)]
 
 mod blend;
+mod color;
 mod error;
 mod fonts;
 mod image;

@@ -24,6 +24,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 mimalloc = { version = "0.1", default-features = false }
+moxcms = "0.8"
 rayon = "1"
 rustybuzz = "0.20"
 tiny-skia = "0.11"

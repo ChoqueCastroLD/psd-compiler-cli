@@ -25,8 +25,20 @@ pub(crate) fn zeroed(len: usize) -> Vec<f32> {
     v
 }
 
+/// Runs `f` over the rows of `rows` (each `stride` long), in parallel when the area is large.
+pub(crate) fn for_rows<T: Send>(rows: &mut [T], stride: usize, area: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    if stride == 0 {
+        return;
+    }
+    if area >= PARALLEL_MIN {
+        rows.par_chunks_mut(stride).enumerate().for_each(|(i, r)| f(i, r));
+    } else {
+        rows.chunks_mut(stride).enumerate().for_each(|(i, r)| f(i, r));
+    }
+}
+
 /// Premultiplied RGBA float raster placed at `(x, y)` in document space.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Raster {
     pub x: i32,
     pub y: i32,
@@ -36,11 +48,15 @@ pub(crate) struct Raster {
 }
 
 impl Raster {
+    pub fn new(x: i32, y: i32, w: usize, h: usize) -> Raster {
+        Raster { x, y, w, h, px: zeroed(w * h * 4) }
+    }
+
     pub fn alpha(&self) -> Vec<f32> {
         self.px.chunks_exact(4).map(|p| p[3]).collect()
     }
 
-    /// Solid `color` with per-pixel coverage `cov`, covering the same rectangle as `self`.
+    /// Solid `color` with per-pixel coverage `cov`.
     pub fn solid(x: i32, y: i32, w: usize, h: usize, cov: &[f32], color: [f32; 3]) -> Raster {
         let mut px = vec![0.0; w * h * 4];
         for (p, &k) in px.chunks_exact_mut(4).zip(cov) {
@@ -62,93 +78,129 @@ impl Raster {
         }
         Raster { x: self.x - pad as i32, y: self.y - pad as i32, w, h, px }
     }
-}
 
-/// One compositing operation.
-pub(crate) struct Paint {
-    pub raster: Raster,
-    pub mode: BlendMode,
-    pub opacity: f32,
-}
+    /// Copy of the part of `self` inside the given rectangle (transparent where `self` has no pixels).
+    pub fn crop(&self, x: i32, y: i32, w: usize, h: usize) -> Raster {
+        let mut out = Raster::new(x, y, w, h);
+        out.copy_from(self);
+        out
+    }
 
-/// Single-channel alpha over a document rectangle, used as the base of a clipping group.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Alpha {
-    pub x: i32,
-    pub y: i32,
-    pub w: usize,
-    pub h: usize,
-    pub a: Vec<f32>,
-}
-
-impl Alpha {
-    pub fn of(r: &Raster) -> Alpha {
-        Alpha { x: r.x, y: r.y, w: r.w, h: r.h, a: r.alpha() }
+    /// Overwrites the overlapping part of `self` with `src`.
+    pub fn copy_from(&mut self, src: &Raster) {
+        let Some((x0, y0, x1, y1)) = overlap(self, src) else { return };
+        let n = (x1 - x0) as usize * 4;
+        for y in y0..y1 {
+            let d = self.index(x0, y);
+            let s = src.index(x0, y);
+            self.px[d..d + n].copy_from_slice(&src.px[s..s + n]);
+        }
     }
 
     #[inline]
-    pub fn at(&self, x: i32, y: i32) -> f32 {
-        let (u, v) = (x - self.x, y - self.y);
-        if u < 0 || v < 0 || u as usize >= self.w || v as usize >= self.h {
-            0.0
-        } else {
-            self.a[v as usize * self.w + u as usize]
-        }
-    }
-}
-
-/// Premultiplied RGBA float surface the layers are composited onto.
-pub(crate) struct Canvas {
-    pub w: usize,
-    pub h: usize,
-    pub px: Vec<f32>,
-}
-
-impl Canvas {
-    pub fn new(w: usize, h: usize) -> Canvas {
-        Canvas { w, h, px: zeroed(w * h * 4) }
+    pub fn index(&self, x: i32, y: i32) -> usize {
+        ((y - self.y) as usize * self.w + (x - self.x) as usize) * 4
     }
 
-    pub fn alpha(&self) -> Vec<f32> {
-        self.px.chunks_exact(4).map(|p| p[3]).collect()
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && y >= self.y && x < self.x + self.w as i32 && y < self.y + self.h as i32
     }
 
-    /// Composites `p` with an extra `opacity`, optionally masked by a clipping base.
-    pub fn paint(&mut self, p: &Paint, opacity: f32, clip: Option<&Alpha>) {
-        let r = &p.raster;
-        let mut x0 = r.x.max(0);
-        let mut y0 = r.y.max(0);
-        let mut x1 = (r.x + r.w as i32).min(self.w as i32);
-        let mut y1 = (r.y + r.h as i32).min(self.h as i32);
-        if let Some(c) = clip {
-            x0 = x0.max(c.x);
-            y0 = y0.max(c.y);
-            x1 = x1.min(c.x + c.w as i32);
-            y1 = y1.min(c.y + c.h as i32);
-        }
-        if x0 >= x1 || y0 >= y1 {
+    /// Composites `src` onto `self` with `mode` and `opacity`.
+    ///
+    /// `ga`, when present, accumulates the alpha painted so far (the group alpha of a non-isolated
+    /// group, used to take the backdrop back out and to limit adjustments to the group's content).
+    pub fn paint(&mut self, src: &Raster, mode: BlendMode, opacity: f32, ga: Option<&mut Vec<f32>>) {
+        let Some((x0, y0, x1, y1)) = overlap(self, src) else { return };
+        if opacity <= 0.0 {
             return;
         }
-        let k = p.opacity * opacity;
-        let mode = p.mode;
         let stride = self.w * 4;
-        let rows = &mut self.px[y0 as usize * stride..y1 as usize * stride];
-        let body = |(i, row): (usize, &mut [f32])| {
+        let (sx, sy) = (self.x, self.y);
+        let rows = &mut self.px[(y0 - sy) as usize * stride..(y1 - sy) as usize * stride];
+        let area = ((x1 - x0) * (y1 - y0)) as usize;
+        let row = |i: usize, row: &mut [f32]| {
             let y = y0 + i as i32;
-            let src_row = (y - r.y) as usize * r.w;
-            let src = &r.px[(src_row + (x0 - r.x) as usize) * 4..(src_row + (x1 - r.x) as usize) * 4];
-            let dst = &mut row[x0 as usize * 4..x1 as usize * 4];
-            match clip {
-                None if mode.is_normal() => source_over(dst, src, k),
-                _ => blend_row(dst, src, mode, |j| k * clip.map_or(1.0, |c| c.at(x0 + j as i32, y))),
+            let s0 = src.index(x0, y);
+            let s = &src.px[s0..s0 + (x1 - x0) as usize * 4];
+            let d = &mut row[(x0 - sx) as usize * 4..(x1 - sx) as usize * 4];
+            if mode.is_normal() {
+                source_over(d, s, opacity);
+            } else {
+                blend_row(d, s, mode, opacity);
             }
         };
-        if ((x1 - x0) * (y1 - y0)) as usize >= PARALLEL_MIN {
-            rows.par_chunks_mut(stride).enumerate().for_each(body);
-        } else {
-            rows.chunks_mut(stride).enumerate().for_each(body);
+        for_rows(rows, stride, area, row);
+        if let Some(ga) = ga {
+            let w = self.w;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let a = src.px[src.index(x, y) + 3] * opacity;
+                    let g = &mut ga[(y - sy) as usize * w + (x - sx) as usize];
+                    *g = a + *g * (1.0 - a);
+                }
+            }
         }
     }
+
+    /// Replaces each pixel by `lerp(self, other, weight)`, in premultiplied space.
+    pub fn lerp_to(&mut self, other: &Raster, weight: impl Fn(i32, i32) -> f32 + Sync) {
+        let stride = self.w * 4;
+        let (sx, sy, w) = (self.x, self.y, self.w);
+        let area = self.w * self.h;
+        for_rows(&mut self.px, stride, area, |i, row| {
+            let y = sy + i as i32;
+            for x in 0..w {
+                let k = weight(sx + x as i32, y);
+                if k <= 0.0 {
+                    continue;
+                }
+                let o = &other.px[other.index(sx + x as i32, y)..][..4];
+                for c in 0..4 {
+                    row[x * 4 + c] += (o[c] - row[x * 4 + c]) * k;
+                }
+            }
+        });
+    }
+
+    /// Applies an adjustment: `adjusted = mode(backdrop, f(backdrop))`, mixed in by `weight`.
+    pub fn adjust(
+        &mut self,
+        f: &(dyn Fn([f32; 3]) -> [f32; 3] + Sync),
+        mode: BlendMode,
+        weight: impl Fn(i32, i32) -> f32 + Sync,
+    ) {
+        let stride = self.w * 4;
+        let (sx, sy, w) = (self.x, self.y, self.w);
+        let area = self.w * self.h;
+        for_rows(&mut self.px, stride, area, |i, row| {
+            let y = sy + i as i32;
+            for (x, p) in row.chunks_exact_mut(4).enumerate().take(w) {
+                let a = p[3];
+                if a <= 0.0 {
+                    continue;
+                }
+                let k = weight(sx + x as i32, y);
+                if k <= 0.0 {
+                    continue;
+                }
+                let c = [p[0] / a, p[1] / a, p[2] / a].map(|v| v.clamp(0.0, 1.0));
+                let t = f(c).map(|v| v.clamp(0.0, 1.0));
+                let t = if mode.is_normal() { t } else { mode.apply(c, t) };
+                for ch in 0..3 {
+                    p[ch] = (c[ch] + (t[ch] - c[ch]) * k) * a;
+                }
+            }
+        });
+    }
+}
+
+fn overlap(a: &Raster, b: &Raster) -> Option<(i32, i32, i32, i32)> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w as i32).min(b.x + b.w as i32);
+    let y1 = (a.y + a.h as i32).min(b.y + b.h as i32);
+    (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
 fn source_over(dst: &mut [f32], src: &[f32], k: f32) {
@@ -169,25 +221,23 @@ fn source_over(dst: &mut [f32], src: &[f32], k: f32) {
     }
 }
 
-fn blend_row(dst: &mut [f32], src: &[f32], mode: BlendMode, weight: impl Fn(usize) -> f32) {
-    for (j, (d, s)) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)).enumerate() {
-        let k = weight(j);
-        let sa = s[3] * k;
-        if sa <= 0.0 {
+fn blend_row(dst: &mut [f32], src: &[f32], mode: BlendMode, k: f32) {
+    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        if s[3] <= 0.0 {
             continue;
         }
-        let sc = [s[0] * k, s[1] * k, s[2] * k];
+        let cs = [s[0] / s[3], s[1] / s[3], s[2] / s[3]].map(|v| v.clamp(0.0, 1.0));
+        let sa = s[3] * k;
         let da = d[3];
-        if mode.is_normal() || da <= 0.0 {
+        if da <= 0.0 {
             for c in 0..3 {
-                d[c] = sc[c] + d[c] * (1.0 - sa);
+                d[c] = cs[c] * sa + d[c] * (1.0 - sa);
             }
         } else {
-            let cs = sc.map(|v| v / sa);
-            let cb = [d[0] / da, d[1] / da, d[2] / da];
+            let cb = [d[0] / da, d[1] / da, d[2] / da].map(|v| v.clamp(0.0, 1.0));
             let mixed = mode.apply(cb, cs);
             for c in 0..3 {
-                d[c] = sc[c] * (1.0 - da) + d[c] * (1.0 - sa) + sa * da * mixed[c];
+                d[c] = cs[c] * sa * (1.0 - da) + d[c] * (1.0 - sa) + sa * da * mixed[c];
             }
         }
         d[3] = sa + da * (1.0 - sa);
@@ -204,8 +254,8 @@ mod tests {
         Raster { x, y, w, h, px }
     }
 
-    fn pixel(c: &Canvas, x: usize, y: usize) -> [f32; 4] {
-        let i = (y * c.w + x) * 4;
+    fn pixel(c: &Raster, x: i32, y: i32) -> [f32; 4] {
+        let i = c.index(x, y);
         [c.px[i], c.px[i + 1], c.px[i + 2], c.px[i + 3]]
     }
 
@@ -213,75 +263,74 @@ mod tests {
         a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5)
     }
 
-    fn paint(r: Raster, mode: BlendMode, opacity: f32) -> Paint {
-        Paint { raster: r, mode, opacity }
-    }
-
     #[test]
     fn source_over_with_opacity() {
-        let mut c = Canvas::new(2, 1);
-        c.paint(&paint(raster(0, 0, 2, 1, [0.0, 0.0, 1.0, 1.0]), BlendMode::Normal, 1.0), 1.0, None);
-        c.paint(&paint(raster(0, 0, 1, 1, [1.0, 0.0, 0.0, 1.0]), BlendMode::Normal, 0.5), 1.0, None);
+        let mut c = Raster::new(0, 0, 2, 1);
+        c.paint(&raster(0, 0, 2, 1, [0.0, 0.0, 1.0, 1.0]), BlendMode::Normal, 1.0, None);
+        c.paint(&raster(0, 0, 1, 1, [1.0, 0.0, 0.0, 1.0]), BlendMode::Normal, 0.5, None);
         assert!(near(pixel(&c, 0, 0), [0.5, 0.0, 0.5, 1.0]));
         assert!(near(pixel(&c, 1, 0), [0.0, 0.0, 1.0, 1.0]));
     }
 
     #[test]
-    fn clips_to_canvas_bounds() {
-        let mut c = Canvas::new(2, 2);
-        c.paint(&paint(raster(-5, 1, 6, 4, [1.0; 4]), BlendMode::Normal, 1.0), 1.0, None);
-        assert!(near(pixel(&c, 0, 1), [1.0; 4]));
-        assert!(near(pixel(&c, 1, 1), [0.0; 4]));
-        assert!(near(pixel(&c, 0, 0), [0.0; 4]));
-    }
-
-    #[test]
-    fn clipping_base_masks_the_paint() {
-        let mut c = Canvas::new(3, 1);
-        let base = Alpha { x: 1, y: 0, w: 1, h: 1, a: vec![0.5] };
-        c.paint(&paint(raster(0, 0, 3, 1, [1.0; 4]), BlendMode::Normal, 1.0), 1.0, Some(&base));
-        assert!(near(pixel(&c, 0, 0), [0.0; 4]));
-        assert!(near(pixel(&c, 1, 0), [0.5; 4]));
-        assert!(near(pixel(&c, 2, 0), [0.0; 4]));
+    fn clips_to_canvas_bounds_and_offsets() {
+        let mut c = Raster::new(10, 10, 2, 2);
+        c.paint(&raster(5, 11, 6, 4, [1.0; 4]), BlendMode::Normal, 1.0, None);
+        assert!(near(pixel(&c, 10, 11), [1.0; 4]));
+        assert!(near(pixel(&c, 11, 11), [0.0; 4]));
+        assert!(near(pixel(&c, 10, 10), [0.0; 4]));
     }
 
     #[test]
     fn multiply_over_opaque_backdrop() {
-        let mut c = Canvas::new(1, 1);
-        c.paint(&paint(raster(0, 0, 1, 1, [0.5, 1.0, 1.0, 1.0]), BlendMode::Normal, 1.0), 1.0, None);
-        c.paint(&paint(raster(0, 0, 1, 1, [0.5, 0.5, 0.0, 1.0]), BlendMode::Multiply, 1.0), 1.0, None);
+        let mut c = Raster::new(0, 0, 1, 1);
+        c.paint(&raster(0, 0, 1, 1, [0.5, 1.0, 1.0, 1.0]), BlendMode::Normal, 1.0, None);
+        c.paint(&raster(0, 0, 1, 1, [0.5, 0.5, 0.0, 1.0]), BlendMode::Multiply, 1.0, None);
         assert!(near(pixel(&c, 0, 0), [0.25, 0.5, 0.0, 1.0]));
     }
 
     #[test]
     fn blend_on_transparent_backdrop_acts_normal() {
-        let mut c = Canvas::new(1, 1);
-        c.paint(&paint(raster(0, 0, 1, 1, [0.2, 0.4, 0.6, 1.0]), BlendMode::Screen, 1.0), 1.0, None);
+        let mut c = Raster::new(0, 0, 1, 1);
+        c.paint(&raster(0, 0, 1, 1, [0.2, 0.4, 0.6, 1.0]), BlendMode::Screen, 1.0, None);
         assert!(near(pixel(&c, 0, 0), [0.2, 0.4, 0.6, 1.0]));
     }
 
     #[test]
     fn large_paints_take_the_parallel_path() {
-        let mut c = Canvas::new(1024, 512);
-        c.paint(&paint(raster(0, 0, 1024, 512, [1.0, 0.0, 0.0, 1.0]), BlendMode::Normal, 1.0), 0.5, None);
+        let mut c = Raster::new(0, 0, 1024, 512);
+        c.paint(&raster(0, 0, 1024, 512, [1.0, 0.0, 0.0, 1.0]), BlendMode::Normal, 0.5, None);
         assert!(near(pixel(&c, 1023, 511), [0.5, 0.0, 0.0, 0.5]));
     }
 
     #[test]
-    fn padding_and_solid() {
+    fn group_alpha_accumulates() {
+        let mut c = Raster::new(0, 0, 1, 1);
+        let mut ga = vec![0.0];
+        c.paint(&raster(0, 0, 1, 1, [1.0, 1.0, 1.0, 0.5]), BlendMode::Normal, 1.0, Some(&mut ga));
+        c.paint(&raster(0, 0, 1, 1, [1.0, 1.0, 1.0, 0.5]), BlendMode::Normal, 1.0, Some(&mut ga));
+        assert!((ga[0] - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lerp_and_adjust() {
+        let mut c = raster(0, 0, 1, 1, [1.0, 0.0, 0.0, 1.0]);
+        c.lerp_to(&raster(0, 0, 1, 1, [0.0, 0.0, 1.0, 1.0]), |_, _| 0.25);
+        assert!(near(pixel(&c, 0, 0), [0.75, 0.0, 0.25, 1.0]));
+        let mut d = raster(0, 0, 1, 1, [0.2, 0.4, 0.6, 0.5]);
+        d.adjust(&|c| c.map(|v| 1.0 - v), BlendMode::Normal, |_, _| 1.0);
+        assert!(near(pixel(&d, 0, 0), [0.4, 0.3, 0.2, 0.5]));
+    }
+
+    #[test]
+    fn padding_crop_and_solid() {
         let r = raster(3, 4, 1, 1, [1.0; 4]).padded(2);
         assert_eq!((r.x, r.y, r.w, r.h), (1, 2, 5, 5));
         assert_eq!(r.alpha().iter().sum::<f32>(), 1.0);
         assert_eq!(r.alpha()[12], 1.0);
+        let c = r.crop(3, 4, 2, 1);
+        assert_eq!(c.alpha(), [1.0, 0.0]);
         let s = Raster::solid(0, 0, 2, 1, &[1.0, 0.5], [1.0, 0.0, 0.0]);
         assert_eq!(s.px, [1.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0, 0.5]);
-    }
-
-    #[test]
-    fn alpha_lookup_outside_is_zero() {
-        let a = Alpha { x: 1, y: 1, w: 1, h: 1, a: vec![0.7] };
-        assert_eq!(a.at(1, 1), 0.7);
-        assert_eq!(a.at(0, 1), 0.0);
-        assert_eq!(a.at(2, 1), 0.0);
     }
 }

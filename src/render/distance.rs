@@ -122,6 +122,23 @@ pub(crate) fn supersample(a: &[f32], w: usize, h: usize) -> Vec<bool> {
             *out = top + (bottom - top) * fy >= 0.5;
         }
     }
+    // Photoshop treats any covered pixel away from the edge as inside, however faint (a soft brush
+    // stroke gets a hard outline); only the outermost pixels place the edge by their coverage.
+    let at = |x: usize, y: usize| padded[(y + 1) * pw + x + 1];
+    let interior: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            at(x, y) > 0.0
+                && padded[y * pw + x + 1] > 0.0
+                && padded[(y + 2) * pw + x + 1] > 0.0
+                && padded[(y + 1) * pw + x] > 0.0
+                && padded[(y + 1) * pw + x + 2] > 0.0
+        })
+        .collect();
+    for (i, m) in mask.iter_mut().enumerate() {
+        let (sx, sy) = (i % sw, i / sw);
+        *m |= interior[(sy / SS) * w + sx / SS];
+    }
     mask
 }
 
