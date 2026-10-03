@@ -14,14 +14,18 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped.
 
-CI runs it on the [psd-tools](https://github.com/psd-tools/psd-tools) test files, pinned to a commit.
-None of the files are committed here.
+CI runs it on the [psd-tools](https://github.com/psd-tools/psd-tools) and
+[ag-psd](https://github.com/Agamnentzar/ag-psd) test files, each pinned to a commit. Files ag-psd
+wrote itself (`test/write`, `expected.psd`) are left out: they carry no Photoshop composite. None of
+the files are committed here.
 
 ## Results
 
 | Suite | Match |
 |---|---|
 | psd-tools `tests/psd_files` | 262 / 274 (95.6%) |
+| ag-psd `test` | 71 / 76 (93.4%) |
+| Both | 333 / 350 (95.1%) |
 
 ### Misses
 
@@ -34,13 +38,18 @@ None of the files are committed here.
 | `effects/blend-modes.psd`, `effects/effect-enums.psd`, `effects/shape-fx2.psd`, `effects/stroke-effects.psd` | Effect edges off by one pixel in places (1–4% of pixels). |
 | `passthrough_fill_blendmode.psd` | Pass-through group with fill opacity and blend modes inside. |
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
+| ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
+| ag-psd `read-write/strokes`, `multiple-strokes-test.psd` | Several strokes on one layer, and stroke edges at sharp corners. |
+| ag-psd `read/blend-mode` | Drop shadows with blend modes over a transparent document come out lighter than Photoshop's. |
 
 ## Calibrated models
 
 Measured against the stored composites:
 
-- **Gradients**: smooth stops use Hermite ramps between stops and honor midpoints; "Perceptual"
-  and Lab interpolation run in Lab. A linear gradient spans the line through the box center as far
+- **Gradients**: smooth stops use Hermite ramps between stops and honor midpoints. The
+  interpolation method (`gs99` in gradient fills and overlays, the method tag of version 3 gradient
+  maps) picks the space: "Classic" and "Smooth" run in encoded RGB, "Linear" in linear light,
+  "Perceptual" in Oklab; Lab documents interpolate in Lab. A linear gradient spans the line through the box center as far
   as the box clips it: half-length `min(w/|cos|, h/|sin|) · scale / 2`.
 - **Strokes** measure distance from pixel centers. The inside band replaces the layer's pixels;
   outside strokes knock out the drop shadow under the layer. Gradient strokes span the stroke's
@@ -54,6 +63,12 @@ Measured against the stored composites:
   fill opacity fade the color toward the mode's neutral color rather than lowering alpha. Over a
   transparent backdrop the layer shows plainly at its fill opacity; over a covered one the faded
   color blends at full strength.
+- **Interior effects over blend modes**: overlays, inner shadows and glows, satin and inner bevels
+  are blended onto the layer after it was blended with the backdrop, inside its shape, rather than
+  onto the layer alone.
+- **Text** blends with gamma 1.53 (Photoshop's "Blend Text Colors Using Gamma"): coverage mixes
+  `B^γ` and `S^γ`, so antialiased edges look heavier than a plain alpha blend.
+- **Effect blend modes** may be stored with long names (`colorBurn`, `softLight`...) in recent files.
 - **Channel restrictions** keep the backdrop's values in unchecked channels.
 - **16-bit Lab**: a/b channels run 256 per unit around 32768; L uses the full range.
 - **Photo filter** colors are stored in RGB, HSB, CMYK, Lab (L/100, a and b as signed /100) or gray

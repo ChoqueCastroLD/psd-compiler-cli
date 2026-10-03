@@ -97,8 +97,12 @@ impl Gradient {
     }
 
     /// Applies the interpolation method of the descriptor holding the gradient (`gs99`).
-    fn interpolated(mut self, d: &Descriptor) -> Gradient {
-        let method = d.enumerated("gs99").or(d.enumerated("gradientsInterpolationMethod"));
+    fn interpolated(self, d: &Descriptor) -> Gradient {
+        self.method(d.enumerated("gs99").or(d.enumerated("gradientsInterpolationMethod")))
+    }
+
+    /// Switches to the space of an interpolation method key ("Lnr ", "Perc"; others are Classic).
+    pub fn method(mut self, method: Option<&str>) -> Gradient {
         let space = match method {
             Some("Lnr ") => Space::Linear,
             Some("Perc") => Space::Oklab,

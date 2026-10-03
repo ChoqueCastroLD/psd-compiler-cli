@@ -207,13 +207,14 @@ Measured against Photoshop on production comic pages:
 |---|---|---|
 | Text layers (body, bold, stroked) | IoU of glyph coverage vs Photoshop raster | **≈ 0.97** |
 | Warp presets (all 15) | IoU vs reference renders | **0.94 – 0.98** |
-| The 274 [psd-tools](https://github.com/psd-tools/psd-tools) test files | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **262 / 274 (95.6%)** |
+| The 350 [psd-tools](https://github.com/psd-tools/psd-tools) and [ag-psd](https://github.com/Agamnentzar/ag-psd) test files | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **333 / 350 (95.1%)** |
 
 The reference test renders every file from its layers and compares it with the merged image Photoshop saved, then prints the match rate of every feature (color modes, depths, layer kinds, blend modes, masks, each effect and adjustment). CI runs it on every push; locally:
 
 ```sh
 git clone https://github.com/psd-tools/psd-tools
-PSDC_REFERENCE_DIR=psd-tools/tests/psd_files cargo test --release --test reference -- --nocapture
+git clone https://github.com/Agamnentzar/ag-psd
+PSDC_REFERENCE_DIR=psd-tools/tests/psd_files:ag-psd cargo test --release --test reference -- --nocapture
 ```
 
 Some misses are out of reach by design: Dissolve and noise gradients use Photoshop's random generator. [docs/REFERENCE.md](docs/REFERENCE.md) lists every miss and the models calibrated against the suite.

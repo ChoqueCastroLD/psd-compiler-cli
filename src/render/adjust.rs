@@ -547,9 +547,7 @@ fn gradient_map(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     let version = r.u16().ok()?;
     let reverse = r.u8().ok()? != 0;
     r.u8().ok()?;
-    if version == 3 {
-        r.tag().ok()?;
-    }
+    let method = if version == 3 { Some(r.tag().ok()?) } else { None };
     r.unicode().ok()?;
     let mut colors = vec![];
     for _ in 0..r.u16().ok()? {
@@ -568,7 +566,8 @@ fn gradient_map(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     }
     r.u16().ok()?;
     let smooth = r.u16().map(|v| v as f64 / 4096.0).unwrap_or(1.0);
-    let lut = Gradient::from_stops(colors, alphas, smooth).table();
+    let method = method.as_ref().map(|m| String::from_utf8_lossy(m).into_owned());
+    let lut = Gradient::from_stops(colors, alphas, smooth).method(method.as_deref()).table();
     Some(Box::new(move |c| {
         let l = lum(c).clamp(0.0, 1.0);
         let l = if reverse { 1.0 - l } else { l };
@@ -688,5 +687,40 @@ mod tests {
         let t = threshold(&mut Reader::new(&[0, 128]), &ColorSpace::default()).unwrap();
         assert_eq!(t([0.6, 0.6, 0.6]), [1.0; 3]);
         assert_eq!(t([0.4, 0.4, 0.4]), [0.0; 3]);
+    }
+
+    fn grdm(version: u16, method: &[u8; 4]) -> Vec<u8> {
+        let mut b = version.to_be_bytes().to_vec();
+        b.extend([0, 0]);
+        if version == 3 {
+            b.extend(method);
+        }
+        b.extend(0u32.to_be_bytes());
+        b.extend(2u16.to_be_bytes());
+        for (at, v) in [(0u32, 0u16), (4096, 65535)] {
+            b.extend(at.to_be_bytes());
+            b.extend(50u32.to_be_bytes());
+            b.extend(0u16.to_be_bytes());
+            b.extend([v, v, v, 0].iter().flat_map(|x| x.to_be_bytes()));
+            b.extend(0u16.to_be_bytes());
+        }
+        b.extend(2u16.to_be_bytes());
+        for at in [0u32, 4096] {
+            b.extend(at.to_be_bytes());
+            b.extend(50u32.to_be_bytes());
+            b.extend(255u16.to_be_bytes());
+        }
+        b.extend([0, 0, 0, 0]);
+        b
+    }
+
+    #[test]
+    fn gradient_map_reads_the_interpolation_method() {
+        let cs = ColorSpace::default();
+        let mid = |b: Vec<u8>| gradient_map(&mut Reader::new(&b), &cs).unwrap()([0.5; 3])[0];
+        let classic = mid(grdm(1, b"Gcls"));
+        let perceptual = mid(grdm(3, b"Perc"));
+        assert!((classic - 0.5).abs() < 0.02, "{classic}");
+        assert!(perceptual < classic - 0.05, "{perceptual}");
     }
 }
