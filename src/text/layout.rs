@@ -481,19 +481,19 @@ fn apply_warp(tl: &TextLayer, glyphs: &mut [Glyph]) {
     let size = tl.styles.first().map_or(12.0, |s| s.size);
     let vertical = tl.warp.vertical;
     let (w, rect) = if vertical {
-        (warp::Warp { vertical: false, ..tl.warp }, [rect[1], rect[0], rect[3], rect[2]])
+        (warp::Warp { vertical: false, ..tl.warp.clone() }, [rect[1], rect[0], rect[3], rect[2]])
     } else {
-        (tl.warp, rect)
+        (tl.warp.clone(), rect)
     };
-    let patch = warp::patch(&w, rect);
+    let env = warp::Envelope::new(&w, rect);
     for g in glyphs {
         let flat = path::flatten(&g.path, size / WARP_FLATTEN_DIVISOR);
         g.path = path::map(&flat, |x, y| {
             if vertical {
-                let (a, b) = warp::eval(&patch, rect, y, x);
+                let (a, b) = env.eval(y, x);
                 (b, a)
             } else {
-                warp::eval(&patch, rect, x, y)
+                env.eval(x, y)
             }
         });
     }

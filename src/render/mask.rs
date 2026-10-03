@@ -84,17 +84,6 @@ impl Region {
         out
     }
 
-    /// Rectangle outside of which the region is zero, if it is bounded.
-    pub fn bounds(&self) -> Option<(i32, i32, i32, i32)> {
-        self.planes.iter().filter(|p| p.outside <= 0.0).fold(None, |acc, p| {
-            let r = (p.x, p.y, p.x + p.w as i32, p.y + p.h as i32);
-            Some(match acc {
-                None => r,
-                Some((x0, y0, x1, y1)) => (x0.max(r.0), y0.max(r.1), x1.min(r.2), y1.min(r.3)),
-            })
-        })
-    }
-
     fn push(&mut self, p: Plane) {
         if p.outside == 1.0 && p.v.iter().all(|&v| v >= 1.0) {
             return;
@@ -167,12 +156,10 @@ mod tests {
         let mut r = Region::default();
         r.push(user_plane(&mask(vec![0, 255], 0, 1.0, 0.0)));
         assert_eq!(r.grid(-1, 0, 4, 1), [0.0, 0.0, 1.0, 0.0]);
-        assert_eq!(r.bounds(), Some((0, 0, 2, 1)));
         let mut d = Region::default();
         d.push(user_plane(&mask(vec![0, 255], 0, 0.5, 0.0)));
         assert_eq!(d.grid(0, 0, 2, 1), [0.5, 1.0]);
         assert_eq!(d.at(5, 5), 0.5);
-        assert_eq!(d.bounds(), None);
     }
 
     #[test]

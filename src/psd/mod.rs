@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use channel::{decode_channel, decode_packbits, to_8bit, Compression};
+use descriptor::Descriptor;
 use reader::Reader;
 
 use crate::blend::BlendMode;
@@ -155,6 +156,18 @@ impl Layer {
         *block = crate::text::edit::replace_text(block, text)?;
         Ok(())
     }
+
+    /// The placement descriptor of a smart object (`SoLd`/`SoLE`).
+    pub(crate) fn placed(&self) -> Option<Descriptor> {
+        let b = self.block(b"SoLd").or(self.block(b"SoLE"))?;
+        // Type key, version, descriptor version.
+        descriptor::parse_block(b, 12).ok()
+    }
+
+    /// Unique id of the embedded or linked file of a smart object.
+    pub(crate) fn smart_id(&self) -> Option<String> {
+        self.placed()?.text("Idnt").map(str::to_owned)
+    }
 }
 
 /// A parsed PSD or PSB document.
@@ -178,6 +191,8 @@ pub struct Document {
     pub(crate) composite: Vec<Vec<u8>>,
     pub(crate) patterns: HashMap<String, Pattern>,
     pub(crate) linked: HashMap<String, Vec<u8>>,
+    /// Embedded documents edited through [`Document::set_text`], by smart object id.
+    pub(crate) edited: HashMap<String, Document>,
     pub(crate) icc_profile: Option<Vec<u8>>,
 }
 
@@ -229,6 +244,7 @@ impl<'a> Blocks<'a> {
             }
             let key = r.tag()?;
             let len = if r.psb && LONG_KEYS.contains(&&key) { r.u64()? as usize } else { r.u32()? as usize };
+            let start = r.pos;
             let body = r.bytes(len.min(end.saturating_sub(r.pos)))?;
             if keep.contains(&&key) {
                 blocks.data.entry(key).or_insert(body);
@@ -236,7 +252,8 @@ impl<'a> Blocks<'a> {
             }
             blocks.present.push(key);
             if pad4 {
-                r.pos = r.pos.next_multiple_of(4).min(end);
+                // Lengths are padded, not positions: the section need not start aligned.
+                r.pos = (start + len.next_multiple_of(4)).min(end);
             }
         }
         Ok(blocks)
@@ -644,19 +661,53 @@ impl Document {
             composite: vec![],
             patterns: HashMap::new(),
             linked: HashMap::new(),
+            edited: HashMap::new(),
             icc_profile: None,
         }
     }
 
     /// Replaces the text of every type layer named `name` (see [`Layer::set_text`]) and returns
     /// how many were changed.
+    ///
+    /// `name` may also be a path through embedded smart objects, `"Smart object/Title"`; the
+    /// smart objects changed this way are re-rendered from their contents.
     pub fn set_text(&mut self, name: &str, text: &str) -> Result<usize> {
         let mut n = 0;
         for l in self.layers.iter_mut().filter(|l| l.name == name && l.kind == LayerKind::Text) {
             l.set_text(text)?;
             n += 1;
         }
-        Ok(n)
+        if n > 0 {
+            return Ok(n);
+        }
+        // Names may contain '/', so try every split into smart object and inner path.
+        for (i, _) in name.match_indices('/') {
+            let (outer, inner) = (&name[..i], &name[i + 1..]);
+            let mut ids: Vec<String> = self
+                .layers
+                .iter()
+                .filter(|l| l.name == outer && l.kind == LayerKind::SmartObject)
+                .filter_map(Layer::smart_id)
+                .collect();
+            ids.sort();
+            ids.dedup();
+            for id in ids {
+                let mut doc = match self.edited.remove(&id) {
+                    Some(d) => d,
+                    None => match self.linked.get(&id) {
+                        Some(data) if data.starts_with(b"8BPS") => Document::parse(data)?,
+                        _ => continue,
+                    },
+                };
+                let changed = doc.set_text(inner, text);
+                self.edited.insert(id, doc);
+                n += changed?;
+            }
+            if n > 0 {
+                return Ok(n);
+            }
+        }
+        Ok(0)
     }
 
     /// Reads and parses a PSD or PSB file.
@@ -783,6 +834,7 @@ impl Document {
             composite,
             patterns,
             linked,
+            edited: HashMap::new(),
             icc_profile,
         })
     }

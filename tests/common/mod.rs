@@ -4,6 +4,7 @@
 use std::io::Write;
 
 /// Descriptor value.
+#[derive(Clone)]
 pub enum V {
     Num(f64),
     Unit(&'static str, f64),
@@ -13,6 +14,7 @@ pub enum V {
     Bool(bool),
     Obj(&'static str, Vec<(&'static str, V)>),
     Raw(Vec<u8>),
+    List(Vec<V>),
 }
 
 struct Buf(Vec<u8>);
@@ -110,6 +112,11 @@ impl Buf {
                 self.u32(data.len() as u32);
                 self.raw(data);
             }
+            V::List(items) => {
+                self.raw(b"VlLs");
+                self.u32(items.len() as u32);
+                items.iter().for_each(|v| self.value(v));
+            }
         }
     }
 }
@@ -206,6 +213,33 @@ impl Layer {
         b.u32(3);
         l.blocks.push((*b"lsct", b.0));
         l
+    }
+
+    /// Smart object showing embedded file `id` on `quad` (corners clockwise from top left), with
+    /// `cached` pixels covering the quad's bounds.
+    pub fn smart(name: &str, id: &str, size: (f64, f64), quad: [(f64, f64); 4], cached: [u8; 4]) -> Layer {
+        let xs = quad.map(|p| p.0);
+        let ys = quad.map(|p| p.1);
+        let (l, t) =
+            (xs.iter().cloned().fold(f64::MAX, f64::min) as i32, ys.iter().cloned().fold(f64::MAX, f64::min) as i32);
+        let (r, b) =
+            (xs.iter().cloned().fold(f64::MIN, f64::max) as i32, ys.iter().cloned().fold(f64::MIN, f64::max) as i32);
+        let corners = V::List(quad.iter().flat_map(|p| [V::Num(p.0), V::Num(p.1)]).collect());
+        let desc = descriptor(
+            "null",
+            &[
+                ("Idnt", V::Text(id.into())),
+                ("Trnf", corners.clone()),
+                ("nonAffineTransform", corners),
+                ("Sz  ", V::Obj("Pnt ", vec![("Wdth", V::Num(size.0)), ("Hght", V::Num(size.1))])),
+            ],
+        );
+        let mut so = Buf(vec![]);
+        so.raw(b"soLD");
+        so.u32(4);
+        so.u32(16);
+        so.raw(&desc);
+        Layer::solid(name, l, t, (r - l) as usize, (b - t) as usize, cached).block(b"SoLd", so.0)
     }
 
     pub fn block(mut self, key: &[u8; 4], data: Vec<u8>) -> Self {
@@ -602,11 +636,13 @@ pub struct Psd {
     pub layers: Vec<Layer>,
     pub composite: Option<[u8; 3]>,
     pub global_angle: Option<i32>,
+    /// Embedded smart object files: unique id and contents.
+    pub linked: Vec<(String, Vec<u8>)>,
 }
 
 impl Psd {
     pub fn new(width: u32, height: u32) -> Psd {
-        Psd { width, height, psb: false, depth: 8, layers: vec![], composite: None, global_angle: None }
+        Psd { width, height, psb: false, depth: 8, layers: vec![], composite: None, global_angle: None, linked: vec![] }
     }
 
     /// Adds a layer above the previous ones.
@@ -768,6 +804,31 @@ impl Psd {
         lm.len(self.psb, info.0.len());
         lm.raw(&info.0);
         lm.u32(0);
+        if !self.linked.is_empty() {
+            let mut lnk = Buf(vec![]);
+            for (id, data) in &self.linked {
+                let mut e = Buf(vec![]);
+                e.raw(b"liFD");
+                e.u32(2);
+                e.u8(id.len() as u8);
+                e.raw(id.as_bytes());
+                e.unicode("embedded");
+                e.raw(b"    ");
+                e.raw(b"    ");
+                e.u64(data.len() as u64);
+                e.u8(0);
+                e.raw(data);
+                lnk.u64(e.0.len() as u64);
+                lnk.raw(&e.0);
+                while lnk.0.len() % 4 != 0 {
+                    lnk.u8(0);
+                }
+            }
+            lm.raw(b"8BIM");
+            lm.raw(b"lnk2");
+            lm.len(self.psb, lnk.0.len());
+            lm.raw(&lnk.0);
+        }
         b.len(self.psb, lm.0.len());
         b.raw(&lm.0);
 

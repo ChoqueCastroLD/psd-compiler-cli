@@ -57,6 +57,11 @@ struct Cli {
     #[arg(long)]
     keep_text: bool,
 
+    /// Re-render smart objects from their embedded PSD, PNG or JPEG instead of the cached pixels.
+    /// Smart objects edited with --set-text are always re-rendered.
+    #[arg(long)]
+    render_smart_objects: bool,
+
     /// Write the coverage of every type layer to DIR as STEM.textNNN.png.
     #[arg(long, value_name = "DIR")]
     text_masks: Option<PathBuf>,
@@ -176,7 +181,11 @@ fn compile(cli: &Cli, fonts: &FontDb, input: &Path) -> Result<()> {
         }
     }
     let parsed = ms(start);
-    let options = RenderOptions { keep_text_raster: cli.keep_text, text_masks: cli.text_masks.is_some() };
+    let options = RenderOptions {
+        keep_text_raster: cli.keep_text,
+        text_masks: cli.text_masks.is_some(),
+        render_smart_objects: cli.render_smart_objects,
+    };
     let rendered = render(&doc, fonts, &options);
     let drawn = ms(start);
     let encode = EncodeOptions { compression: cli.compression, quality: cli.quality, background: cli.background };

@@ -2,6 +2,8 @@
 
 use std::f64::consts::PI;
 
+use crate::psd::descriptor::{Descriptor, Value};
+
 /// Preset envelope of a warped type layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -48,21 +50,177 @@ impl WarpStyle {
 }
 
 /// Warp settings; `bend`, `hdist` and `vdist` are fractions in `-1..=1`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Warp {
     pub style: WarpStyle,
     pub bend: f64,
     pub hdist: f64,
     pub vdist: f64,
     pub vertical: bool,
+    /// A custom envelope, which replaces the preset.
+    pub mesh: Option<Mesh>,
+}
+
+/// A custom (or quilt) envelope: a grid of bicubic patches in absolute coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Mesh {
+    /// Patch edges along x and y in the unwarped rectangle, each including both ends.
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+    /// `(3 (xs.len() - 1) + 1) x (3 (ys.len() - 1) + 1)` control points, row-major.
+    pub points: Vec<Point>,
 }
 
 impl Warp {
-    #[cfg(test)]
-    pub const NONE: Warp = Warp { style: WarpStyle::None, bend: 0.0, hdist: 0.0, vdist: 0.0, vertical: false };
+    pub const NONE: Warp =
+        Warp { style: WarpStyle::None, bend: 0.0, hdist: 0.0, vdist: 0.0, vertical: false, mesh: None };
+
+    /// Reads a warp descriptor; `rect` is the unwarped rectangle a custom mesh spans.
+    pub fn from_descriptor(d: &Descriptor) -> Warp {
+        let key = d.enumerated("warpStyle").unwrap_or("warpNone");
+        let mesh = if key == "warpCustom" { custom_mesh(d) } else { None };
+        Warp {
+            style: if mesh.is_some() { WarpStyle::None } else { WarpStyle::from_key(key) },
+            bend: d.num("warpValue").unwrap_or(0.0) / 100.0,
+            hdist: d.num("warpPerspective").unwrap_or(0.0) / 100.0,
+            vdist: d.num("warpPerspectiveOther").unwrap_or(0.0) / 100.0,
+            vertical: d.enumerated("warpRotate") == Some("Vrtc"),
+            mesh,
+        }
+    }
 
     pub fn is_identity(&self) -> bool {
+        if let Some(m) = &self.mesh {
+            return m.is_identity();
+        }
         self.style == WarpStyle::None || self.bend.abs() + self.hdist.abs() + self.vdist.abs() < 1e-6
+    }
+}
+
+fn numbers(v: &[Value]) -> Vec<f64> {
+    v.iter()
+        .filter_map(|v| match v {
+            Value::Number(n) | Value::Unit(_, n) => Some(*n),
+            Value::Integer(i) => Some(*i as f64),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `customEnvelopeWarp` of a warp descriptor, spanning its `bounds`.
+fn custom_mesh(d: &Descriptor) -> Option<Mesh> {
+    let b = d.desc("bounds")?;
+    let get = |k| b.num(k).unwrap_or(0.0);
+    let (l, t, r, bt) = (get("Left"), get("Top "), get("Rght"), get("Btom"));
+    if r <= l || bt <= t {
+        return None;
+    }
+    let env = d.desc("customEnvelopeWarp")?;
+    let pts = env.desc("meshPoints")?;
+    let (hs, vs) = (numbers(pts.list("Hrzn")?), numbers(pts.list("Vrtc")?));
+    let points: Vec<Point> = hs.into_iter().zip(vs).collect();
+    let slices = |key: &str, lo: f64, hi: f64, n: usize| -> Vec<f64> {
+        let given = env.list(key).map(numbers).unwrap_or_default();
+        match given.len() {
+            k if k == n + 1 => given,
+            k if k + 1 == n && k > 0 => [vec![lo], given, vec![hi]].concat(),
+            _ => (0..=n).map(|i| lo + (hi - lo) * i as f64 / n as f64).collect(),
+        }
+    };
+    let cols = d.num("deformNumCols").map(|c| c as usize);
+    let rows = d.num("deformNumRows").map(|c| c as usize);
+    // Points per side are 3n + 1; take the grid shape from the descriptor or the point count.
+    let (nx, ny) = match (cols, rows) {
+        (Some(c), Some(r)) if c >= 4 && r >= 4 && (c - 1) % 3 == 0 && (r - 1) % 3 == 0 => ((c - 1) / 3, (r - 1) / 3),
+        _ => {
+            let x = env.list("quiltSliceX").map_or(0, |v| v.len());
+            let y = env.list("quiltSliceY").map_or(0, |v| v.len());
+            let guess = |k: usize| if k >= 2 { k - 1 } else { 1 };
+            (guess(x), guess(y))
+        }
+    };
+    if points.len() != (3 * nx + 1) * (3 * ny + 1) {
+        return None;
+    }
+    Some(Mesh { xs: slices("quiltSliceX", l, r, nx), ys: slices("quiltSliceY", t, bt, ny), points })
+}
+
+impl Mesh {
+    /// The undistorted mesh over `rect`.
+    #[cfg(test)]
+    pub fn flat(rect: [f64; 4]) -> Mesh {
+        let [l, t, r, b] = rect;
+        let points =
+            (0..16).map(|k| (l + (r - l) * (k % 4) as f64 / 3.0, t + (b - t) * (k / 4) as f64 / 3.0)).collect();
+        Mesh { xs: vec![l, r], ys: vec![t, b], points }
+    }
+
+    pub fn rect(&self) -> [f64; 4] {
+        [self.xs[0], self.ys[0], *self.xs.last().unwrap(), *self.ys.last().unwrap()]
+    }
+
+    fn is_identity(&self) -> bool {
+        let cols = 3 * (self.xs.len() - 1) + 1;
+        self.points.iter().enumerate().all(|(k, &(x, y))| {
+            let (i, j) = (k % cols, k / cols);
+            let ex = lerp_slices(&self.xs, i);
+            let ey = lerp_slices(&self.ys, j);
+            (x - ex).abs() < 1e-3 && (y - ey).abs() < 1e-3
+        })
+    }
+
+    /// Maps `(x, y)` of the unwarped rectangle through the patch containing it.
+    pub fn eval(&self, x: f64, y: f64) -> Point {
+        let (i, u) = cell(&self.xs, x);
+        let (j, v) = cell(&self.ys, y);
+        let cols = 3 * (self.xs.len() - 1) + 1;
+        let p: Patch = std::array::from_fn(|k| self.points[(3 * j + k / 4) * cols + 3 * i + k % 4]);
+        eval(&p, [0.0, 0.0, 1.0, 1.0], u, v)
+    }
+}
+
+/// Position of control point `i` along slices `s` when undistorted.
+fn lerp_slices(s: &[f64], i: usize) -> f64 {
+    let (c, k) = ((i / 3).min(s.len() - 2), i - 3 * (i / 3).min(s.len() - 2));
+    s[c] + (s[c + 1] - s[c]) * k as f64 / 3.0
+}
+
+/// The patch index along slices `s` holding `x`, and the parameter inside it (may leave 0..1 at the ends).
+fn cell(s: &[f64], x: f64) -> (usize, f64) {
+    let n = s.len() - 1;
+    let i = s[1..n].iter().take_while(|&&e| x >= e).count();
+    let w = s[i + 1] - s[i];
+    (i, if w.abs() < 1e-12 { 0.0 } else { (x - s[i]) / w })
+}
+
+/// A warp ready to map points: a preset patch over a rectangle, or a custom mesh.
+pub(crate) enum Envelope {
+    Patch(Box<Patch>, [f64; 4]),
+    Mesh(Mesh),
+}
+
+impl Envelope {
+    /// The envelope of `warp`; presets span `rect`, custom meshes their own bounds.
+    pub fn new(warp: &Warp, rect: [f64; 4]) -> Envelope {
+        match &warp.mesh {
+            Some(m) => Envelope::Mesh(m.clone()),
+            None => Envelope::Patch(Box::new(patch(warp, rect)), rect),
+        }
+    }
+
+    /// The unwarped rectangle.
+    pub fn rect(&self) -> [f64; 4] {
+        match self {
+            Envelope::Patch(_, r) => *r,
+            Envelope::Mesh(m) => m.rect(),
+        }
+    }
+
+    pub fn eval(&self, x: f64, y: f64) -> Point {
+        match self {
+            Envelope::Patch(p, r) => eval(p, *r, x, y),
+            Envelope::Mesh(m) => m.eval(x, y),
+        }
     }
 }
 
@@ -342,6 +500,38 @@ mod tests {
                 assert!(near(eval(&p, RECT, x, y), (x, y)), "{style:?}");
             }
         }
+    }
+
+    #[test]
+    fn custom_mesh_maps_through_its_patches() {
+        let mut m = Mesh::flat(RECT);
+        assert!(Warp { mesh: Some(m.clone()), ..Warp::NONE }.is_identity());
+        assert!(near(m.eval(35.0, 33.0), (35.0, 33.0)));
+        // Pull the bottom-right corner out: it moves, the opposite corner stays.
+        m.points[15] = (130.0, 90.0);
+        assert!(near(m.eval(110.0, 70.0), (130.0, 90.0)));
+        assert!(near(m.eval(10.0, 20.0), (10.0, 20.0)));
+        assert!(!Warp { mesh: Some(m), ..Warp::NONE }.is_identity());
+    }
+
+    #[test]
+    fn quilt_mesh_picks_the_patch_by_slice() {
+        // Two patches side by side; shift every control point of the right one down by 10.
+        let xs = vec![0.0, 30.0, 100.0];
+        let ys = vec![0.0, 60.0];
+        let points: Vec<Point> = (0..4)
+            .flat_map(|j| {
+                let xs = xs.clone();
+                (0..7).map(move |i| {
+                    let x = lerp_slices(&xs, i);
+                    (x, 20.0 * j as f64 + if i > 3 { 10.0 } else { 0.0 })
+                })
+            })
+            .collect();
+        let m = Mesh { xs, ys, points };
+        assert!(near(m.eval(15.0, 30.0), (15.0, 30.0)));
+        let (_, y) = m.eval(100.0, 30.0);
+        assert!((y - 40.0).abs() < 1e-9, "{y}");
     }
 
     #[test]

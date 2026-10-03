@@ -820,7 +820,7 @@ mod tests {
         let content = Raster { x: 0, y: 0, w: 1, h: 1, px: vec![1.0, 0.0, 0.0, 1.0] };
         let overlay =
             Layered { cov: vec![1.0], tint: Tint::Solid([0.0, 0.0, 1.0]), mode: BlendMode::Normal, opacity: 0.5 };
-        let out = assemble(&content, &[1.0], 1.0, 1.0, &[overlay.clone()]);
+        let out = assemble(&content, &[1.0], 1.0, 1.0, std::slice::from_ref(&overlay));
         assert_eq!(out.px, [0.5, 0.0, 0.5, 1.0]);
         let out = assemble(&content, &[1.0], 0.0, 1.0, &[overlay]);
         assert_eq!(out.px, [0.0, 0.0, 0.5, 0.5]);

@@ -349,7 +349,7 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
         text_raster(doc, l, ctx.fonts, pad, &mut out.warnings)
             .unwrap_or_else(|()| pixel_raster(doc, cs, l).map(|r| r.padded(pad)))
     } else if l.kind == LayerKind::SmartObject {
-        super::smart::render(ctx, l, &mut out.warnings).or_else(|| pixel_raster(doc, cs, l)).map(|r| r.padded(pad))
+        super::smart::render(ctx, l, pad, &mut out.warnings).or_else(|| pixel_raster(doc, cs, l)).map(|r| r.padded(pad))
     } else if l.kind == LayerKind::Fill && (!has_pixels(l) || soft_vector) {
         // Stored pixels hold the shape at full density, so a soft vector mask redraws the fill.
         baked_vector = !soft_vector;

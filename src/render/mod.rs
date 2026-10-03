@@ -38,6 +38,9 @@ pub struct RenderOptions {
     pub keep_text_raster: bool,
     /// Collect the coverage of every re-rendered type layer in [`Rendered::text_masks`].
     pub text_masks: bool,
+    /// Re-render smart objects from their embedded files instead of using the cached pixels.
+    /// Smart objects whose contents were edited are always re-rendered.
+    pub render_smart_objects: bool,
 }
 
 /// Something that could not be rendered exactly.
@@ -626,9 +629,9 @@ fn alpha_bounds(r: &Raster) -> [f64; 4] {
 fn artboard(doc: &Document, l: &Layer, cs: &ColorSpace) -> Option<(Rect, Option<[f32; 3]>)> {
     let d = [b"artb", b"artd", b"abdd"]
         .iter()
+        .rev()
         .filter_map(|k| l.block(k))
-        .filter_map(|b| descriptor::parse_block(b, 4).ok())
-        .last()?;
+        .find_map(|b| descriptor::parse_block(b, 4).ok())?;
     let r = d.desc("artboardRect")?;
     let v = |k: &str| r.num(k).unwrap_or(0.0).round() as i32;
     let rect = (v("Left"), v("Top "), v("Rght"), v("Btom"));

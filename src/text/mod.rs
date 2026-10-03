@@ -9,7 +9,7 @@ use crate::error::{OptionExt, Result};
 use crate::psd::descriptor::{self, Descriptor};
 use crate::psd::engine::{self, Node};
 use crate::psd::reader::Reader;
-use warp::{Warp, WarpStyle};
+use warp::Warp;
 
 /// Anti-aliasing method of a type layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,13 +282,7 @@ impl TextLayer {
                 _ => None,
             });
         let vertical = editor.path(&["Rendered", "Shapes", "WritingDirection"]).and_then(Node::num) == Some(2.0);
-        let warp = Warp {
-            style: WarpStyle::from_key(warp_desc.enumerated("warpStyle").unwrap_or("warpNone")),
-            bend: warp_desc.num("warpValue").unwrap_or(0.0) / 100.0,
-            hdist: warp_desc.num("warpPerspective").unwrap_or(0.0) / 100.0,
-            vdist: warp_desc.num("warpPerspectiveOther").unwrap_or(0.0) / 100.0,
-            vertical: warp_desc.enumerated("warpRotate") == Some("Vrtc"),
-        };
+        let warp = Warp::from_descriptor(&warp_desc);
         Ok(TextLayer {
             chars,
             styles,

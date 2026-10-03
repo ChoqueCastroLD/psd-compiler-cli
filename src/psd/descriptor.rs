@@ -72,7 +72,6 @@ impl Descriptor {
         }
     }
 
-    #[cfg(test)]
     pub fn text(&self, key: &str) -> Option<&str> {
         match self.get(key)? {
             Value::Text(t) => Some(t),

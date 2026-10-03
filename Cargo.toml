@@ -24,9 +24,11 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 image-webp = "0.2"
+jpeg-decoder = { version = "0.3", default-features = false }
 jpeg-encoder = "0.6"
 mimalloc = { version = "0.1", default-features = false }
 moxcms = "0.8"
+png = "0.17"
 rayon = "1"
 ravif = { version = "0.13", default-features = false, features = ["threading"], optional = true }
 rustybuzz = "0.20"
@@ -38,7 +40,6 @@ default = []
 avif = ["dep:ravif"]
 
 [dev-dependencies]
-png = "0.17"
 tempfile = "3"
 
 [profile.release]

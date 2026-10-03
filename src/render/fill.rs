@@ -314,10 +314,6 @@ impl Fill {
         }
     }
 
-    pub fn is_solid(&self) -> bool {
-        matches!(self, Fill::Solid(_))
-    }
-
     /// Paints the fill over the document rectangle `(x, y, w, h)` with coverage `cov` (or full).
     ///
     /// `bounds` is the box an aligned gradient or pattern is laid out on.
