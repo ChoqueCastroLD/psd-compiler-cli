@@ -5,7 +5,7 @@
 
 use super::adjust;
 use super::canvas::Raster;
-use super::distance::{blur, distances, downsample, edge_offsets, soft_distance, Distances, SS};
+use super::distance::{blur, chamfer_distance, distances, downsample, Distances, SS};
 use super::fill::{Fill, Gradient, GradientFill};
 use crate::blend::BlendMode;
 use crate::color::{self, ColorSpace};
@@ -643,17 +643,15 @@ impl Effects {
         }
         p.strokes = p.inner.len();
         // Strokes measure from pixel centers: a pixel's distance outward is the cheapest
-        // `|p - q| + 1 - alpha(q)` over covered pixels, inward `|p - q| + alpha(q)` over pixels
-        // that are not fully covered; the stroke covers `size + 1 - distance`.
+        // `chamfer(p - q) + 1 - alpha(q)` over covered pixels, inward `chamfer(p - q) + alpha(q)`
+        // over pixels that are not fully covered; the stroke covers `size + 1 - distance`.
         let shape: Option<Vec<f32>> = path.map(|v| v.iter().zip(a).map(|(&p, &q)| p.max(q)).collect());
         let src = shape.as_deref().unwrap_or(a);
-        let reach = self.strokes.iter().map(|s| s.size as f32).fold(0.0, f32::max) + 1.0;
         let need = |f: fn(&StrokePosition) -> bool| self.strokes.iter().any(|s| f(&s.position));
-        let edge = if self.strokes.is_empty() { vec![] } else { edge_offsets(src, w, h) };
         let outward = need(|p| *p != StrokePosition::Inside)
-            .then(|| soft_distance(|i| (src[i] > 0.0).then(|| 0.5 + edge[i]), w, h, reach));
-        let inward = need(|p| *p != StrokePosition::Outside)
-            .then(|| soft_distance(|i| (src[i] < 1.0).then(|| 0.5 - edge[i]), w, h, reach));
+            .then(|| chamfer_distance(|i| (src[i] > 0.0).then(|| 1.0 - src[i]), w, h));
+        let inward =
+            need(|p| *p != StrokePosition::Outside).then(|| chamfer_distance(|i| (src[i] < 1.0).then(|| src[i]), w, h));
         // The top stroke's coverage on the layer and beside it, for stroke embosses.
         let mut embossed: Option<(Vec<f32>, Vec<f32>)> = None;
         let first = (p.inner.len(), p.beside.len());

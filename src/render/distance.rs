@@ -182,84 +182,39 @@ pub(crate) fn distances(a: &[f32], w: usize, h: usize, need_inward: bool, rmax: 
     Distances { inside, outside, inward }
 }
 
-/// Signed distance from each pixel center to the edge running through it, estimated from its
-/// coverage and the coverage gradient (Gustavson's anti-aliased distance): positive when the
-/// center lies outside the edge, within `-0.5..=0.5`; 0.5 for empty and -0.5 for full pixels.
-pub(crate) fn edge_offsets(a: &[f32], w: usize, h: usize) -> Vec<f32> {
-    let at = |x: isize, y: isize| -> f32 {
-        if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
-            0.0
-        } else {
-            a[y as usize * w + x as usize]
+/// Chamfer distance in pixels from every pixel center to the cheapest seed: the minimum over seeds
+/// `q` of `chamfer(p - q) + cost(q)` (`None` for pixels that are not seeds), with steps to the 16
+/// nearest neighbors at their true lengths 1, √2 and √5. Photoshop measures strokes this way:
+/// exact along the axes, the diagonals and the knight moves, up to 2.7% long in between.
+pub(crate) fn chamfer_distance(cost: impl Fn(usize) -> Option<f32>, w: usize, h: usize) -> Vec<f32> {
+    let mut d: Vec<f32> = (0..w * h).map(|i| cost(i).unwrap_or(INF)).collect();
+    let (s2, s5) = (std::f32::consts::SQRT_2, 5f32.sqrt());
+    // Neighbors before a pixel in raster order; the backward pass mirrors them.
+    let steps =
+        [(-1, 0, 1.0), (-1, -1, s2), (0, -1, 1.0), (1, -1, s2), (-2, -1, s5), (-1, -2, s5), (1, -2, s5), (2, -1, s5)];
+    let (wi, hi) = (w as isize, h as isize);
+    let mut relax = |x: isize, y: isize, sign: isize| {
+        let i = (y * wi + x) as usize;
+        let mut v = d[i];
+        for &(dx, dy, c) in &steps {
+            let (nx, ny) = (x + dx * sign, y + dy * sign);
+            if nx >= 0 && ny >= 0 && nx < wi && ny < hi {
+                v = v.min(d[(ny * wi + nx) as usize] + c);
+            }
         }
+        d[i] = v;
     };
-    let s2 = std::f32::consts::SQRT_2;
-    (0..w * h)
-        .map(|i| {
-            let v = a[i].clamp(0.0, 1.0);
-            if v <= 0.0 {
-                return 0.5;
-            }
-            if v >= 1.0 {
-                return -0.5;
-            }
-            let (x, y) = ((i % w) as isize, (i / w) as isize);
-            let gx = at(x + 1, y - 1) + s2 * at(x + 1, y) + at(x + 1, y + 1)
-                - at(x - 1, y - 1)
-                - s2 * at(x - 1, y)
-                - at(x - 1, y + 1);
-            let gy = at(x - 1, y + 1) + s2 * at(x, y + 1) + at(x + 1, y + 1)
-                - at(x - 1, y - 1)
-                - s2 * at(x, y - 1)
-                - at(x + 1, y - 1);
-            if gx == 0.0 || gy == 0.0 {
-                return 0.5 - v;
-            }
-            let len = gx.hypot(gy);
-            let (mut gx, mut gy) = ((gx / len).abs(), (gy / len).abs());
-            if gx < gy {
-                std::mem::swap(&mut gx, &mut gy);
-            }
-            let a1 = 0.5 * gy / gx;
-            if v < a1 {
-                0.5 * (gx + gy) - (2.0 * gx * gy * v).sqrt()
-            } else if v < 1.0 - a1 {
-                (0.5 - v) * gx
-            } else {
-                -0.5 * (gx + gy) + (2.0 * gx * gy * (1.0 - v)).sqrt()
-            }
-        })
-        .collect()
-}
-
-/// Levels the per-pixel costs of [`soft_distance`] are rounded up to.
-const COST_LEVELS: usize = 16;
-
-/// Distance in pixels from every pixel center to the cheapest seed: the minimum over seeds `q` of
-/// `|p - q| + cost(q)`, with `cost` in `0..1` (`None` for pixels that are not seeds). Costs are
-/// rounded up to sixteenths. Exact up to `rmax` pixels; anything farther comes back as [`INF`].
-pub(crate) fn soft_distance(cost: impl Fn(usize) -> Option<f32> + Sync, w: usize, h: usize, rmax: f32) -> Vec<f32> {
-    let level: Vec<u8> = (0..w * h)
-        .map(|i| cost(i).map_or(u8::MAX, |c| (c.clamp(0.0, 1.0) * COST_LEVELS as f32).ceil() as u8))
-        .collect();
-    let mut present = [false; COST_LEVELS + 1];
-    for &l in &level {
-        if l != u8::MAX {
-            present[l as usize] = true;
+    for y in 0..hi {
+        for x in 0..wi {
+            relax(x, y, 1);
         }
     }
-    let mut out = vec![INF; w * h];
-    for k in (0..=COST_LEVELS).filter(|&k| present[k]) {
-        let seed: Vec<bool> = level.iter().map(|&l| l != u8::MAX && l as usize <= k).collect();
-        let t = k as f32 / COST_LEVELS as f32;
-        let d = edt(&seed, w, h, rmax + 1.0);
-        for (o, &d2) in out.iter_mut().zip(&d) {
-            if d2 < INF {
-                *o = o.min(d2.sqrt() + t);
-            }
+    for y in (0..hi).rev() {
+        for x in (0..wi).rev() {
+            relax(x, y, -1);
         }
     }
-    out
+    d
 }
 
 /// Blocked transpose of a `w x h` row-major buffer into `h x w`.
@@ -351,6 +306,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn chamfer_steps_at_true_lengths() {
+        let (w, h) = (9, 9);
+        let d = chamfer_distance(|i| (i == 0).then_some(0.5), w, h);
+        let at = |x: usize, y: usize| d[y * w + x];
+        assert_eq!(at(0, 0), 0.5);
+        assert!((at(8, 0) - 8.5).abs() < 1e-5);
+        assert!((at(4, 4) - (0.5 + 4.0 * 2f32.sqrt())).abs() < 1e-5);
+        assert!((at(8, 4) - (0.5 + 4.0 * 5f32.sqrt())).abs() < 1e-5);
+        // Between the knight move and the axis it runs long: one knight move and two straight steps.
+        assert!((at(4, 1) - (0.5 + 5f32.sqrt() + 2.0)).abs() < 1e-5);
+        assert!(at(4, 1) > 0.5 + 17f32.sqrt());
     }
 
     #[test]

@@ -34,11 +34,11 @@ files are committed here.
 | Suite | Match |
 |---|---|
 | psd-tools `tests/psd_files` | 269 / 274 (98.2%) |
-| ag-psd `test` | 73 / 76 (96.1%) |
+| ag-psd `test` | 74 / 76 (97.4%) |
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
 | PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
 | Krita `plugins/impex/psd/tests/data` | 20 / 20 |
-| All | 501 / 511 (98.0%) |
+| All | 502 / 511 (98.2%) |
 
 ### Misses
 
@@ -51,7 +51,6 @@ files are committed here.
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
 | PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.07, 2.5% of pixels). |
-| ag-psd `multiple-strokes-test.psd` | Strokes around soft brush edges reach about 0.2 px further than Photoshop's (1.4% of pixels). |
 
 ## Calibrated models
 
@@ -64,7 +63,10 @@ Measured against the stored composites:
   maps) picks the space: "Classic" runs in encoded RGB, "Linear" in linear light, "Perceptual"
   in Oklab, "Smooth" in Oklab without the classic smoothness; Lab documents interpolate in Lab. A linear gradient spans the line through the box center as far
   as the box clips it: half-length `min(w/|cos|, h/|sin|) · scale / 2`.
-- **Strokes** measure distance from pixel centers. The inside band replaces the layer's pixels;
+- **Strokes** measure a chamfer distance from pixel centers: steps to the 16 nearest neighbors at
+  their true lengths (1, √2, √5), so they are exact along the axes, diagonals and knight moves and
+  up to 2.7% long in between (large strokes around round shapes come out slightly faceted). A pixel
+  costs `1 − alpha` outward and `alpha` inward. The inside band replaces the layer's pixels;
   outside strokes knock out the drop shadow under the layer. Gradient strokes span the stroke's
   outer edge. Several strokes on one layer are listed top first; each covers the ones below it,
   so a multiplying stroke multiplies the backdrop rather than the stroke under it. Other
