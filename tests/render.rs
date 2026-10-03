@@ -166,6 +166,20 @@ fn restricted_channels_keep_the_backdrop() {
 }
 
 #[test]
+fn faded_modes_show_plainly_over_transparency() {
+    // Matches Photoshop: a Linear Light layer at 20% fill blends its faded color where the
+    // backdrop is covered and shows at 20% where it is transparent.
+    let img = draw(
+        Psd::new(2, 2)
+            .layer(Layer::solid("blue", 0, 0, 2, 2, [0, 0, 255, 255]).opacity(153))
+            .layer(Layer::solid("green", 0, 0, 2, 2, [0, 255, 0, 255]).opacity(102).blend(b"lLit"))
+            .layer(Layer::solid("red", 0, 0, 2, 2, [255, 0, 0, 255]).fill(51).blend(b"lLit")),
+    );
+    let (got, want) = (img.pixel(1, 1), [63, 78, 66, 206]);
+    assert!(got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 2), "{got:?}");
+}
+
+#[test]
 fn blend_if_hides_by_own_and_underlying_values() {
     const FULL: [u8; 4] = [0, 0, 255, 255];
     // Underlay: left half black, right half white. A gray ramp on top.

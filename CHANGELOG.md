@@ -22,6 +22,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Smart objects linked to files outside the document, found next to it or at their absolute path; `Document::open` and `Document::set_base_dir`.
 - Smart filters on re-rendered smart objects: blurs, sharpening, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves and brightness/contrast, with their blending options.
 - Writing CMYK, Lab, duotone, indexed and 32-bit documents.
+- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the psd-tools test files (262/274 match).
+- Effect contours, glow range and jitter, Blend If, channel restrictions, "Blend Interior Effects as Group", layer style pattern origin (`fxrp`), CMYK plates and 32-bit linear compositing.
 
 ### Changed
 
@@ -31,6 +33,14 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Embedded smart object files were missed in some documents (global block padding).
+- Effects and fills calibrated against Photoshop composites:
+  - Gradients use Hermite ramps for smooth stops, honor stop midpoints, interpolate in Lab when asked, and linear gradients span the center line as far as the box clips it.
+  - Strokes measure from pixel centers; their inner band replaces the layer's pixels; outside strokes knock out drop shadows the layer conceals; stroke gradients span the stroke's outer edge.
+  - A shape's vector stroke is drawn above its overlays and clipped layers, below its layer style strokes.
+  - Effects in Color/Linear Dodge, Burn, Difference and Vivid/Linear Light fade toward the mode's neutral color instead of losing alpha (fill opacity too).
+  - Smooth bevels are lit from the blurred shape; smooth emboss and pillow emboss blur over half their size, and a pillow is lit per side of its fold.
+  - Pass-through groups with fill opacity are isolated; 16-bit posterize uses 16-bit levels.
+- 16-bit Lab a/b channels are read and written at 256 per unit around 32768.
 
 ## [0.1.0] - 2026-10-03
 

@@ -29,7 +29,7 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode, depth: u16) -> 
         b"expA" => exposure(r, if mode == ColorMode::Grayscale { 1.75 } else { 2.2 }),
         b"selc" => selective_color(r),
         b"mixr" => channel_mixer(r),
-        b"grdm" => gradient_map(r),
+        b"grdm" => gradient_map(r, cs),
         b"phfl" => photo_filter(r, cs),
         b"nvrt" => Some(Box::new(|c: [f32; 3]| c.map(|v| 1.0 - v)) as ColorFn),
         b"post" => posterize(r, depth),
@@ -527,7 +527,23 @@ fn channel_mixer(r: &mut Reader) -> Option<ColorFn> {
     }))
 }
 
-fn gradient_map(r: &mut Reader) -> Option<ColorFn> {
+/// A Photoshop color record: a color space id and four 16-bit components.
+fn color_record(r: &mut Reader, cs: &ColorSpace) -> Option<[f32; 3]> {
+    let space = r.u16().ok()?;
+    let raw: Vec<u16> = (0..4).map(|_| r.u16()).collect::<Result<_, _>>().ok()?;
+    let v = raw.iter().map(|&x| x as f64 / 65535.0).collect::<Vec<_>>();
+    Some(match space {
+        1 => color::hsb_to_rgb(v[0], v[1], v[2]).map(|x| x as f32),
+        2 => cs.cmyk(1.0 - v[0], 1.0 - v[1], 1.0 - v[2], 1.0 - v[3]),
+        // L in hundredths, a and b in signed hundredths.
+        7 => color::lab_to_rgb(raw[0] as f64 / 100.0, raw[1] as i16 as f64 / 100.0, raw[2] as i16 as f64 / 100.0),
+        // Gray as ink coverage in hundredths of a percent.
+        8 => [1.0 - (raw[0] as f32 / 10000.0).min(1.0); 3],
+        _ => [v[0] as f32, v[1] as f32, v[2] as f32],
+    })
+}
+
+fn gradient_map(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     let version = r.u16().ok()?;
     let reverse = r.u8().ok()? != 0;
     r.u8().ok()?;
@@ -539,14 +555,8 @@ fn gradient_map(r: &mut Reader) -> Option<ColorFn> {
     for _ in 0..r.u16().ok()? {
         let at = r.u32().ok()? as f64 / 4096.0;
         let mid = r.u32().ok()? as f64 / 100.0;
-        let space = r.u16().ok()?;
-        let v: Vec<f64> = (0..4).map(|_| r.u16().map(|x| x as f64 / 65535.0)).collect::<Result<_, _>>().ok()?;
+        let rgb = color_record(r, cs)?;
         r.u16().ok()?;
-        let rgb = match space {
-            1 => color::hsb_to_rgb(v[0], v[1], v[2]).map(|x| x as f32),
-            8 => [1.0 - (v[0] * 65535.0 / 10000.0) as f32; 3],
-            _ => [v[0] as f32, v[1] as f32, v[2] as f32],
-        };
         colors.push((at, mid, rgb.map(|x| x.clamp(0.0, 1.0))));
     }
     let mut alphas = vec![];
@@ -577,12 +587,7 @@ fn photo_filter(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
         let (fx, fy, fz) = (f(x / 96.422), f(y / 100.0), f(z / 82.521));
         color::lab_to_rgb(116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
     } else {
-        let space = r.u16().ok()?;
-        let v: Vec<f64> = (0..4).map(|_| r.u16().map(|x| x as f64 / 65535.0)).collect::<Result<_, _>>().ok()?;
-        match space {
-            2 => cs.cmyk(1.0 - v[0], 1.0 - v[1], 1.0 - v[2], 1.0 - v[3]),
-            _ => [v[0] as f32, v[1] as f32, v[2] as f32],
-        }
+        color_record(r, cs)?
     };
     let density = r.u32().ok()? as f32 / 100.0;
     let preserve = r.u8().unwrap_or(1) != 0;

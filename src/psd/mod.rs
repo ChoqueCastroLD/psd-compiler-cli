@@ -961,7 +961,7 @@ impl Document {
         let mut transparent_index = None;
         let mut icc_profile = None;
         let mut duotone_preview = None;
-        let mut real_composite = true;
+        let mut real_composite = None;
         while r.pos + 12 <= resources_end {
             if &r.tag()? != b"8BIM" {
                 break;
@@ -976,7 +976,7 @@ impl Document {
                 1049 if size >= 4 => global_altitude = Reader::new(body).i32()? as f64,
                 1039 => icc_profile = Some(body.to_vec()),
                 1066 => duotone_preview = Some(body),
-                1057 if size >= 5 => real_composite = body[4] != 0,
+                1057 if size >= 5 => real_composite = Some(body[4] != 0),
                 1047 if size >= 2 => transparent_index = Some(Reader::new(body).u16()?.min(255) as u8),
                 _ => {}
             }
@@ -1029,6 +1029,10 @@ impl Document {
             color_mode.channels(),
             color_mode == ColorMode::Lab,
         )?;
+        // Without version info, an all-zero merged image is a placeholder (smart object contents
+        // Photoshop wrote without one), not black.
+        let real_composite =
+            real_composite.unwrap_or_else(|| layers.is_empty() || composite.iter().any(|p| p.iter().any(|&v| v != 0)));
         Ok(Document {
             width,
             height,

@@ -45,3 +45,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --lib
+
+  reference:
+    # Renders every psd-tools test file and compares it with the composite Photoshop stored.
+    runs-on: ubuntu-latest
+    env:
+      PSD_TOOLS_COMMIT: 9e706d6ba3b5e5c91a1d0c423ff783ce3e9c363c
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the psd-tools test files
+        run: |
+          git init -q psd-tools
+          git -C psd-tools remote add origin https://github.com/psd-tools/psd-tools.git
+          git -C psd-tools fetch -q --depth 1 origin "$PSD_TOOLS_COMMIT"
+          git -C psd-tools checkout -q FETCH_HEAD
+      - run: cargo test --release --test reference -- --nocapture
+        env:
+          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files

@@ -207,6 +207,16 @@ Measured against Photoshop on production comic pages:
 |---|---|---|
 | Text layers (body, bold, stroked) | IoU of glyph coverage vs Photoshop raster | **≈ 0.97** |
 | Warp presets (all 15) | IoU vs reference renders | **0.94 – 0.98** |
+| The 274 [psd-tools](https://github.com/psd-tools/psd-tools) test files | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **262 / 274 (95.6%)** |
+
+The reference test renders every file from its layers and compares it with the merged image Photoshop saved, then prints the match rate of every feature (color modes, depths, layer kinds, blend modes, masks, each effect and adjustment). CI runs it on every push; locally:
+
+```sh
+git clone https://github.com/psd-tools/psd-tools
+PSDC_REFERENCE_DIR=psd-tools/tests/psd_files cargo test --release --test reference -- --nocapture
+```
+
+Some misses are out of reach by design: Dissolve and noise gradients use Photoshop's random generator. [docs/REFERENCE.md](docs/REFERENCE.md) lists every miss and the models calibrated against the suite.
 
 ## Performance
 
@@ -231,7 +241,7 @@ Here is why it is fast:
 |---|---|---|
 | Files | PSD, PSB, 1/8/16/32-bit; writes edited PSD/PSB in RGB, grayscale, CMYK, Lab, duotone and indexed (32-bit RGB and grayscale too) | Writing bitmap or multichannel documents |
 | Color | RGB, grayscale, bitmap, CMYK, indexed, Lab, duotone (Photoshop's ink preview, else the ink curves), multichannel | Duotone with color-book inks and no preview (shown as grayscale) |
-| Layers | Pixel, text, groups, pass-through, knockout, clipping, layer and vector masks, fill layers, opacity, fill | |
+| Layers | Pixel, text, groups, pass-through, knockout, clipping, layer and vector masks, fill layers, shape strokes, opacity, fill, Blend If, channel restrictions, blend interior/clipped layers as group | |
 | Adjustments | Levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold, black & white, color lookup (CUBE, 3DL, LOOK, abstract and device-link profiles) | |
 | Smart objects | Cached pixels; re-rendered from embedded or linked PSD/PSB, PNG or JPEG with perspective and warps; text edits inside; smart filters: Gaussian, box and motion blur, blur, blur more, sharpen, sharpen more, sharpen edges, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves, brightness/contrast | Other smart filters (cached pixels used), smart filter masks |
 | Blend modes | All 27, including Dissolve, Hue/Saturation/Color/Luminosity | |

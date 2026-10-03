@@ -289,6 +289,33 @@ impl Comp {
         }
     }
 
+    /// Paints a layer whose fill opacity fades a mode toward its neutral color: over the
+    /// backdrop's coverage `faded` blends at full strength, over its transparency `plain` (the
+    /// layer at its fill opacity) shows as is.
+    fn paint_split(&mut self, faded: &Raster, plain: &Raster, shape: &[f32], mode: BlendMode) {
+        let Some((x0, y0, x1, y1)) = intersect(self.rect(), raster_rect(faded)) else { return };
+        let unpremultiply = |p: &[f32]| if p[3] > 0.0 { [p[0] / p[3], p[1] / p[3], p[2] / p[3]] } else { [0.0; 3] };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (i, j) = (self.at(x, y), faded.index(x, y));
+                let s = shape[j / 4];
+                if s <= 0.0 {
+                    continue;
+                }
+                let (f, q) = (&faded.px[j..j + 4], &plain.px[j..j + 4]);
+                let b = &mut self.cv.px[i * 4..i * 4 + 4];
+                let ab = b[3];
+                let mixed = mode.apply(unpremultiply(b), unpremultiply(f));
+                for c in 0..3 {
+                    b[c] = (1.0 - f[3]) * b[c] + ab * f[3] * mixed[c] + (1.0 - ab) * q[c];
+                }
+                b[3] = ab + (1.0 - ab) * q[3];
+                self.ga[i] += (1.0 - self.ga[i]) * q[3];
+                self.sg[i] = s + self.sg[i] * (1.0 - s);
+            }
+        }
+    }
+
     fn weight<'a>(&'a self, w: impl Fn(i32, i32) -> f32 + Sync + 'a) -> impl Fn(i32, i32) -> f32 + Sync + 'a {
         move |x, y| if self.adjust_isolated { w(x, y) * self.sg[self.at(x, y)] } else { w(x, y) }
     }
@@ -606,7 +633,13 @@ impl Compositor<'_> {
         for e in &s.prepared.beside {
             comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, Some(&s.coverage)), None, e.mode, 0);
         }
+        // Where the backdrop is transparent the layer still shows at its fill opacity.
+        let mut plain = None;
         if let Some(neutral) = mode.neutral().filter(|_| f < 1.0) {
+            if knockout(l) == 0 {
+                plain =
+                    Some(effects::assemble(&s.content, &s.coverage, (f, 0), 1.0, &s.prepared.inner, Some(&comp.cv)));
+            }
             for p in s.content.px.chunks_exact_mut(4) {
                 let a = p[3];
                 for ch in 0..3 {
@@ -631,16 +664,21 @@ impl Compositor<'_> {
             }
             self.restroke(l, &mut body);
         }
-        if o < 1.0 {
-            body.px.iter_mut().for_each(|v| *v *= o);
+        for b in std::iter::once(&mut body).chain(plain.as_mut()) {
+            if o < 1.0 {
+                b.px.iter_mut().for_each(|v| *v *= o);
+            }
+            if l.blend_if {
+                blend_if(&l.blend_ranges, b, &comp.cv);
+            }
         }
         if mode == BlendMode::Dissolve {
             dissolve(&mut body);
         }
-        if l.blend_if {
-            blend_if(&l.blend_ranges, &mut body, &comp.cv);
+        match &plain {
+            Some(plain) => comp.paint_split(&body, plain, &s.coverage, mode),
+            None => comp.paint(&body, Some(&s.coverage), mode, knockout(l)),
         }
-        comp.paint(&body, Some(&s.coverage), mode, knockout(l));
         if let Some(before) = before {
             for (p, q) in comp.cv.px.chunks_exact_mut(4).zip(before.chunks_exact(4)) {
                 for &ch in &restricted {
