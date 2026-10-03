@@ -201,16 +201,6 @@ fn knockout(l: &Layer) -> u8 {
     l.block(b"knko").and_then(|b| b.first().copied()).unwrap_or(0).min(2)
 }
 
-/// Modes for which fill opacity fades the color toward the mode's neutral instead of thinning it.
-fn fill_neutral(mode: BlendMode) -> Option<f32> {
-    match mode {
-        BlendMode::ColorDodge | BlendMode::LinearDodge | BlendMode::Difference => Some(0.0),
-        BlendMode::ColorBurn | BlendMode::LinearBurn => Some(1.0),
-        BlendMode::VividLight | BlendMode::LinearLight | BlendMode::HardMix => Some(0.5),
-        _ => None,
-    }
-}
-
 /// A compositing context: one group being painted over its backdrop.
 struct Comp {
     /// Premultiplied result so far.
@@ -441,7 +431,8 @@ impl Compositor<'_> {
         let (o, f) = (ratio(l.opacity), ratio(l.fill_opacity));
         let reach = effects.reach().ceil() as i32;
         let artboard = artboard(doc, l, cs);
-        let pass_through = l.blend_mode == BlendMode::PassThrough && artboard.is_none();
+        // With its fill lowered a pass-through group renders apart, like a normal one.
+        let pass_through = l.blend_mode == BlendMode::PassThrough && artboard.is_none() && f >= 1.0;
         if pass_through {
             let knocks = children.iter().any(|c| knockout(self.layer(c)) > 0);
             if o >= 1.0 && f >= 1.0 && mask.is_empty() && clips.is_empty() && effects.is_empty() && !knocks {
@@ -572,7 +563,7 @@ impl Compositor<'_> {
         for e in &s.prepared.beside {
             comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, Some(&s.coverage)), None, e.mode, 0);
         }
-        if let Some(neutral) = fill_neutral(mode).filter(|_| f < 1.0) {
+        if let Some(neutral) = mode.neutral().filter(|_| f < 1.0) {
             for p in s.content.px.chunks_exact_mut(4) {
                 let a = p[3];
                 for ch in 0..3 {
@@ -582,7 +573,7 @@ impl Compositor<'_> {
             f = 1.0;
         }
         let grouped = if interior_grouped { s.prepared.interior } else { 0 };
-        let mut body = effects::assemble(&s.content, &s.coverage, (f, grouped), 1.0, &s.prepared.inner);
+        let mut body = effects::assemble(&s.content, &s.coverage, (f, grouped), 1.0, &s.prepared.inner, Some(&comp.cv));
         if !clips.is_empty() && interior_grouped {
             let mut sub = Comp::new(raster_rect(&body), Some(body.clone()), None, false);
             self.composite_refs(clips, &mut sub);

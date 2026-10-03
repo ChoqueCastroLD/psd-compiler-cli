@@ -173,7 +173,7 @@ impl Gradient {
                     return ch(&b.value);
                 }
                 let u = (t - a.at) / span;
-                let u = if u < a.mid { 0.5 * u / a.mid } else { 0.5 + 0.5 * (u - a.mid) / (1.0 - a.mid) };
+                let u = if u < b.mid { 0.5 * u / b.mid } else { 0.5 + 0.5 * (u - b.mid) / (1.0 - b.mid) };
                 let (va, vb) = (v(i), v(i + 1));
                 let linear = va + (vb - va) * u;
                 if self.smooth <= 0.0 {
@@ -466,7 +466,7 @@ mod tests {
     fn ramp_with_midpoint() {
         let mut g = bw();
         assert_eq!(g.sample(0.5), [0.5, 0.5, 0.5, 1.0]);
-        g.colors[0].mid = 0.25;
+        g.colors[1].mid = 0.25;
         assert_eq!(g.sample(0.25)[0], 0.5);
         assert_eq!(g.sample(2.0), [1.0; 4]);
     }

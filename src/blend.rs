@@ -85,6 +85,18 @@ impl BlendMode {
         }
     }
 
+    /// For modes where fill opacity fades the color toward a neutral one instead of thinning it
+    /// (effects fade by their opacity and coverage the same way), that neutral value.
+    pub(crate) fn neutral(self) -> Option<f32> {
+        use BlendMode::*;
+        match self {
+            ColorDodge | LinearDodge | Difference => Some(0.0),
+            ColorBurn | LinearBurn => Some(1.0),
+            VividLight | LinearLight | HardMix => Some(0.5),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_normal(self) -> bool {
         matches!(self, BlendMode::Normal | BlendMode::PassThrough | BlendMode::Dissolve)
     }
