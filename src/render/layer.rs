@@ -3,7 +3,7 @@
 use rayon::prelude::*;
 
 use super::adjust::{self, ColorFn};
-use super::canvas::{prefault, Raster};
+use super::canvas::{zeroed, Raster};
 use super::effects::{self, Effects, Prepared};
 use super::fill::Fill;
 use super::mask::{self, Region};
@@ -16,7 +16,8 @@ use crate::text::path::{self, Seg};
 use crate::text::{layout, AntiAlias, TextLayer};
 
 /// Largest text raster, in pixels, before a layer is skipped as runaway.
-const MAX_TEXT_PIXELS: u64 = 40_000_000;
+/// Pixels per band when drawing type.
+const TEXT_BAND_PIXELS: usize = 1 << 22;
 
 #[derive(Default)]
 pub(crate) struct LayerOutput {
@@ -168,15 +169,34 @@ fn shape_raster(doc: &Document, cs: &ColorSpace, l: &Layer, bake: bool) -> Optio
     Some(r)
 }
 
-fn text_raster(l: &Layer, fonts: &crate::fonts::FontDb, pad: usize, warnings: &mut Vec<String>) -> Option<Raster> {
-    let tl = match TextLayer::parse(l.block(b"TySh")?) {
+/// Re-renders type layer `l`, clipped to the canvas grown by `pad`. `Err` when its text cannot
+/// be read, so the cached pixels stand in.
+fn text_raster(
+    doc: &Document,
+    l: &Layer,
+    fonts: &crate::fonts::FontDb,
+    pad: usize,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Raster>, ()> {
+    let Some(block) = l.block(b"TySh") else { return Err(()) };
+    let tl = match TextLayer::parse(block) {
         Ok(t) => t,
         Err(e) => {
-            warnings.push(format!("text could not be parsed ({e}); skipped"));
-            return None;
+            warnings.push(format!("text could not be parsed ({e}); using the cached pixels"));
+            return Err(());
         }
     };
-    let laid = layout::layout(&tl, fonts);
+    Ok(draw_text(doc, &tl, fonts, pad, warnings))
+}
+
+fn draw_text(
+    doc: &Document,
+    tl: &TextLayer,
+    fonts: &crate::fonts::FontDb,
+    pad: usize,
+    warnings: &mut Vec<String>,
+) -> Option<Raster> {
+    let laid = layout::layout(tl, fonts);
     for f in &laid.missing_fonts {
         warnings.push(format!("font {f} not found; using a fallback"));
     }
@@ -196,18 +216,19 @@ fn text_raster(l: &Layer, fonts: &crate::fonts::FontDb, pad: usize, warnings: &m
     let bold = glyphs.iter().map(|g| g.2).fold(0.0, f64::max);
     let [x0, y0, x1, y1] = path::bounds(glyphs.iter().map(|g| &g.0))?;
     let margin = pad as i32 + 1 + bold.ceil() as i32;
-    let ix = x0.floor() as i32 - margin;
-    let iy = y0.floor() as i32 - margin;
-    let w = (x1.ceil() as i32 + margin - ix).max(1) as u32;
-    let h = (y1.ceil() as i32 + margin - iy).max(1) as u32;
-    if w as u64 * h as u64 > MAX_TEXT_PIXELS {
-        warnings.push("text raster too large; skipped".into());
+    // Nothing beyond the canvas and the reach of the layer's effects can show.
+    let clip = (-margin, -margin, doc.width as i32 + margin, doc.height as i32 + margin);
+    let ix = (x0.floor() as i32 - margin).max(clip.0);
+    let iy = (y0.floor() as i32 - margin).max(clip.1);
+    let ix1 = (x1.ceil() as i32 + margin).min(clip.2);
+    let iy1 = (y1.ceil() as i32 + margin).min(clip.3);
+    if ix1 <= ix || iy1 <= iy {
         return None;
     }
-    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
-    prefault(pixmap.data_mut());
+    let (w, h) = ((ix1 - ix) as usize, (iy1 - iy) as usize);
     let (ox, oy) = (ix as f64, iy as f64);
     let pt = |x: f64, y: f64| ((x - ox) as f32, (y - oy) as f32);
+    let mut paths = Vec::with_capacity(glyphs.len());
     for (p, color, bold) in &glyphs {
         let mut pb = tiny_skia::PathBuilder::new();
         for seg in p {
@@ -236,14 +257,30 @@ fn text_raster(l: &Layer, fonts: &crate::fonts::FontDb, pad: usize, warnings: &m
         let mut paint = tiny_skia::Paint::default();
         paint.set_color(tiny_skia::Color::from_rgba(r, g, b, a)?);
         paint.anti_alias = tl.anti_alias != AntiAlias::None;
-        pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, tiny_skia::Transform::identity(), None);
-        if *bold > 0.0 {
-            let stroke =
-                tiny_skia::Stroke { width: *bold as f32, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
-            pixmap.stroke_path(&path, &paint, &stroke, tiny_skia::Transform::identity(), None);
-        }
+        paths.push((path, paint, *bold));
     }
-    let mut px: Vec<f32> = pixmap.data().iter().map(|&v| v as f32 / 255.0).collect();
+    // Drawn in bands so the 8-bit canvas stays small however large the layer is.
+    let band = (TEXT_BAND_PIXELS / w).clamp(1, h);
+    let mut px = zeroed(w * h * 4);
+    for (i, out) in px.chunks_mut(w * band * 4).enumerate() {
+        let rows = out.len() / (w * 4);
+        let mut pixmap = tiny_skia::Pixmap::new(w as u32, rows as u32)?;
+        let shift = tiny_skia::Transform::from_translate(0.0, -((i * band) as f32));
+        let (top, bottom) = ((i * band) as f32, (i * band + rows) as f32);
+        for (path, paint, bold) in &paths {
+            let reach = *bold as f32;
+            if path.bounds().top() - reach > bottom || path.bounds().bottom() + reach < top {
+                continue;
+            }
+            pixmap.fill_path(path, paint, tiny_skia::FillRule::Winding, shift, None);
+            if *bold > 0.0 {
+                let stroke =
+                    tiny_skia::Stroke { width: reach, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+                pixmap.stroke_path(path, paint, &stroke, shift, None);
+            }
+        }
+        out.iter_mut().zip(pixmap.data()).for_each(|(o, &v)| *o = v as f32 / 255.0);
+    }
     let exponent = tl.anti_alias.coverage_exponent();
     if exponent != 1.0 {
         for p in px.chunks_exact_mut(4) {
@@ -254,7 +291,7 @@ fn text_raster(l: &Layer, fonts: &crate::fonts::FontDb, pad: usize, warnings: &m
             }
         }
     }
-    Some(Raster { x: ix, y: iy, w: w as usize, h: h as usize, px })
+    Some(Raster { x: ix, y: iy, w, h, px })
 }
 
 /// The layer style of `l`.
@@ -309,7 +346,8 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
     let mut baked_vector = false;
     let soft_vector = l.vector_density < 1.0 || l.vector_feather > 0.0;
     let content = if is_text {
-        text_raster(l, ctx.fonts, pad, &mut out.warnings)
+        text_raster(doc, l, ctx.fonts, pad, &mut out.warnings)
+            .unwrap_or_else(|()| pixel_raster(doc, cs, l).map(|r| r.padded(pad)))
     } else if l.kind == LayerKind::SmartObject {
         super::smart::render(ctx, l, &mut out.warnings).or_else(|| pixel_raster(doc, cs, l)).map(|r| r.padded(pad))
     } else if l.kind == LayerKind::Fill && (!has_pixels(l) || soft_vector) {
@@ -320,7 +358,8 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
         pixel_raster(doc, cs, l).map(|r| r.padded(pad))
     };
     let Some(content) = content else { return out };
-    out.mask = mask::region(doc, l, !baked_vector && !is_text && (l.kind != LayerKind::Fill || !has_pixels(l) || soft_vector));
+    out.mask =
+        mask::region(doc, l, !baked_vector && !is_text && (l.kind != LayerKind::Fill || !has_pixels(l) || soft_vector));
     out.coverage = coverage(&content, &out.mask);
     if !out.effects.is_empty() {
         let b = &l.bounds;
@@ -328,7 +367,12 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
             [b.left as f64, b.top as f64, b.right as f64, b.bottom as f64]
         } else {
             let pad = pad as f64;
-            [content.x as f64 + pad, content.y as f64 + pad, (content.x + content.w as i32) as f64 - pad, (content.y + content.h as i32) as f64 - pad]
+            [
+                content.x as f64 + pad,
+                content.y as f64 + pad,
+                (content.x + content.w as i32) as f64 - pad,
+                (content.y + content.h as i32) as f64 - pad,
+            ]
         };
         let fill = l.fill_opacity as f32 / 255.0;
         let rect = (content.x, content.y, content.w, content.h);

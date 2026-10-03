@@ -68,7 +68,8 @@ fn levels(r: &mut Reader) -> Option<ColorFn> {
     let mut luts: [Option<Vec<f32>>; 4] = Default::default();
     for lut in &mut luts {
         let v: Vec<f64> = (0..5).map(|_| r.u16().map(|x| x as f64)).collect::<Result<_, _>>().ok()?;
-        let (ib, iw, ob, ow, g) = (v[0] / 255.0, v[1] / 255.0, v[2] / 255.0, v[3] / 255.0, (v[4] / 100.0).clamp(0.01, 9.99));
+        let (ib, iw, ob, ow, g) =
+            (v[0] / 255.0, v[1] / 255.0, v[2] / 255.0, v[3] / 255.0, (v[4] / 100.0).clamp(0.01, 9.99));
         if (ib, iw, ob, ow, g) == (0.0, 1.0, 0.0, 1.0, 1.0) {
             continue;
         }
@@ -142,7 +143,8 @@ fn curves(data: &[u8]) -> Option<ColorFn> {
             Some(table(spline(&pts)))
         }
     };
-    let ids: Vec<u32> = if version == 1 { (0..32).filter(|i| bits & (1 << i) != 0).collect() } else { (0..bits).collect() };
+    let ids: Vec<u32> =
+        if version == 1 { (0..32).filter(|i| bits & (1 << i) != 0).collect() } else { (0..bits).collect() };
     for id in ids {
         let c = read_curve(&mut r)?;
         if let Some(slot) = luts.get_mut(id as usize) {
@@ -431,7 +433,13 @@ fn selective_color(r: &mut Reader) -> Option<ColorFn> {
         let lo = c[0].min(c[1]).min(c[2]);
         let mid = c[0] + c[1] + c[2] - hi - lo;
         let mut weights = [0f32; 10];
-        let primary = if hi == c[0] { 1 } else if hi == c[1] { 3 } else { 5 };
+        let primary = if hi == c[0] {
+            1
+        } else if hi == c[1] {
+            3
+        } else {
+            5
+        };
         weights[primary] = hi - mid;
         let secondary = match (c[0] == lo, c[1] == lo) {
             (true, _) => 4,
@@ -574,7 +582,13 @@ fn black_white(data: &[u8], cs: &ColorSpace) -> Option<ColorFn> {
         let hi = c[0].max(c[1]).max(c[2]);
         let lo = c[0].min(c[1]).min(c[2]);
         let mid = c[0] + c[1] + c[2] - hi - lo;
-        let primary = if hi == c[0] { red } else if hi == c[1] { green } else { blue };
+        let primary = if hi == c[0] {
+            red
+        } else if hi == c[1] {
+            green
+        } else {
+            blue
+        };
         let secondary = match (c[0] == lo, c[1] == lo) {
             (true, _) => cyan,
             (_, true) => magenta,

@@ -75,7 +75,9 @@ fn set_runs(run: &mut Node, new: &[(usize, usize)]) {
 /// character style used most in it.
 fn refit(editor: &mut Node, old: &[u16], new: &[u16]) {
     let (old_paras, new_paras) = (paragraphs(old), paragraphs(new));
-    let lengths = |key: &str, editor: &Node| editor.path(&[key, "RunLengthArray"]).map(|a| a.array().to_vec()).unwrap_or_default();
+    let lengths = |key: &str, editor: &Node| {
+        editor.path(&[key, "RunLengthArray"]).map(|a| a.array().to_vec()).unwrap_or_default()
+    };
     let para_of = run_of_each(&lengths("ParagraphRun", editor), old.len());
     let style_of = run_of_each(&lengths("StyleRun", editor), old.len());
     let mut para_units = vec![];
@@ -151,10 +153,18 @@ mod tests {
         )
         .unwrap();
         refit(&mut editor, &utf16("abc\rde\r"), &utf16("x\ryyyy\rzz\r"));
-        let lens = |k: &str| editor.path(&[k, "RunLengthArray"]).unwrap().array().iter().map(|n| n.num().unwrap()).collect::<Vec<_>>();
+        let lens = |k: &str| {
+            editor.path(&[k, "RunLengthArray"]).unwrap().array().iter().map(|n| n.num().unwrap()).collect::<Vec<_>>()
+        };
         assert_eq!(lens("ParagraphRun"), [2.0, 8.0]);
         assert_eq!(lens("StyleRun"), [2.0, 8.0]);
-        let styles: Vec<f64> = editor.path(&["StyleRun", "RunArray"]).unwrap().array().iter().map(|n| n.get("S").unwrap().num().unwrap()).collect();
+        let styles: Vec<f64> = editor
+            .path(&["StyleRun", "RunArray"])
+            .unwrap()
+            .array()
+            .iter()
+            .map(|n| n.get("S").unwrap().num().unwrap())
+            .collect();
         assert_eq!(styles, [1.0, 2.0]);
     }
 }

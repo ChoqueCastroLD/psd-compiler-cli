@@ -205,7 +205,8 @@ const LAYER_KEYS: [&[u8; 4]; 49] = [
     b"TySh", b"lfx2", b"lmfx", b"lsct", b"lsdk", b"iOpa", b"luni", b"vmsk", b"vsms", b"vstk", b"vscg", b"SoLd",
     b"SoLE", b"PlLd", b"knko", b"clbl", b"infx", b"tsly", b"lmgm", b"vmgm", b"brst", b"SoCo", b"GdFl", b"PtFl",
     b"levl", b"curv", b"brit", b"hue2", b"hue ", b"blnc", b"vibA", b"expA", b"selc", b"mixr", b"grdm", b"phfl",
-    b"nvrt", b"post", b"thrs", b"CgEd", b"clrL", b"blwh", b"lclr", b"shmd", b"fxrp", b"lyvr", b"artb", b"artd", b"abdd",
+    b"nvrt", b"post", b"thrs", b"CgEd", b"clrL", b"blwh", b"lclr", b"shmd", b"fxrp", b"lyvr", b"artb", b"artd",
+    b"abdd",
 ];
 const GLOBAL_KEYS: [&[u8; 4]; 10] =
     [b"Layr", b"Lr16", b"Lr32", b"Patt", b"Pat2", b"Pat3", b"lnk2", b"lnkD", b"lnk3", b"lnkE"];
@@ -490,7 +491,9 @@ fn read_patterns(data: &[u8], out: &mut HashMap<String, Pattern>) {
         let Ok(len) = r.u32() else { break };
         let start = r.pos;
         let next = (start + len as usize).next_multiple_of(4);
-        if let Ok((id, p)) = read_pattern(&mut Reader::at(&data[..(start + len as usize).min(data.len())], start, false)) {
+        if let Ok((id, p)) =
+            read_pattern(&mut Reader::at(&data[..(start + len as usize).min(data.len())], start, false))
+        {
             out.entry(id).or_insert(p);
         }
         if next <= r.pos || next > data.len() {
@@ -758,8 +761,14 @@ impl Document {
             }
         }
         r.pos = layer_mask_end;
-        let composite =
-            read_composite(&mut r, width as usize, height as usize, channel_count as usize, depth, color_mode.channels())?;
+        let composite = read_composite(
+            &mut r,
+            width as usize,
+            height as usize,
+            channel_count as usize,
+            depth,
+            color_mode.channels(),
+        )?;
         Ok(Document {
             width,
             height,

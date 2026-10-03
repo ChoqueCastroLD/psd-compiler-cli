@@ -15,6 +15,15 @@ const UNDERLINE_OFFSET: f64 = 0.1;
 const STRIKETHROUGH_OFFSET: f64 = -0.3;
 const FALLBACK_ASCENT: f64 = 0.8;
 const WARP_FLATTEN_DIVISOR: f64 = 40.0;
+/// Synthetic superscript and subscript: size and baseline offset, as fractions of the font size.
+const SYNTHETIC_SCALE: f64 = 0.583;
+const SYNTHETIC_SHIFT: f64 = 0.333;
+/// Vertical text: the ideographic em box spans this much of the size above the baseline.
+const EM_ASCENT: f64 = 0.88;
+/// Distance from the baseline to the center of the em box.
+const EM_CENTER: f64 = EM_ASCENT - 0.5;
+/// How far corner punctuation moves up and right in vertical text.
+const CORNER_SHIFT: f64 = 0.5;
 
 const PARAGRAPH_BREAK: char = '\r';
 const LINE_BREAK: char = '\u{3}';
@@ -37,6 +46,8 @@ struct PlacedGlyph {
     font: usize,
     dx: f64,
     dy: f64,
+    /// Vertical text: the font has no vertical form, so the glyph moves to the upper right.
+    corner: bool,
 }
 
 struct Item {
@@ -80,8 +91,34 @@ fn apply_caps(c: char, caps: Caps) -> (char, f64) {
 
 struct Run {
     font: Option<usize>,
+    upright: bool,
     start: usize,
     chars: Vec<(char, char, f64)>,
+}
+
+/// Characters set upright in vertical text (CJK, kana, hangul, fullwidth forms and symbols);
+/// everything else is turned 90 degrees clockwise, as are brackets and long marks whose upright
+/// form is their turned shape.
+pub(crate) fn upright(c: char) -> bool {
+    let turned = matches!(c as u32, 0x3008..=0x3011 | 0x3014..=0x301C | 0x30FC | 0xFF08 | 0xFF09 | 0xFF3B | 0xFF3D | 0xFF5B..=0xFF60);
+    !turned
+        && matches!(c as u32,
+        0x1100..=0x11FF
+            | 0x2E80..=0x2FFF
+            | 0x3000..=0x9FFF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7FF
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE1F
+            | 0xFE30..=0xFE4F
+            | 0xFF00..=0xFFEF
+            | 0x1F000..=0x1FAFF
+            | 0x20000..=0x3FFFF)
+}
+
+/// Commas and stops that move to the upper right of the em box in vertical text.
+fn corner_punctuation(c: char) -> bool {
+    matches!(c, '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}')
 }
 
 /// Shapes `chars` (all sharing `style`) and appends one item per character.
@@ -97,6 +134,7 @@ fn shape_span(
     primary: Option<usize>,
     out: &mut Vec<Item>,
     first_style: usize,
+    vertical: bool,
 ) {
     let mut runs: Vec<Run> = vec![];
     for (i, &c) in chars.iter().enumerate() {
@@ -106,9 +144,10 @@ fn shape_span(
             _ if shaped.is_whitespace() || shaped.is_control() => primary,
             _ => faces.db.fallback_for(shaped).or(primary),
         };
+        let up = vertical && upright(shaped);
         match runs.last_mut() {
-            Some(run) if run.font == font => run.chars.push((c, shaped, scale)),
-            _ => runs.push(Run { font, start: i, chars: vec![(c, shaped, scale)] }),
+            Some(run) if run.font == font && run.upright == up => run.chars.push((c, shaped, scale)),
+            _ => runs.push(Run { font, upright: up, start: i, chars: vec![(c, shaped, scale)] }),
         }
     }
     for run in runs {
@@ -126,7 +165,14 @@ fn shape_span(
         let shape = |kern: bool| {
             let mut buf = rustybuzz::UnicodeBuffer::new();
             buf.push_str(&text);
-            let features = if kern { vec![] } else { vec![rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 0, ..)] };
+            let mut features: Vec<rustybuzz::Feature> =
+                style.features.iter().map(|(t, v)| rustybuzz::Feature::new(Tag::from_bytes(t), *v, ..)).collect();
+            if !kern {
+                features.push(rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 0, ..));
+            }
+            if run.upright {
+                features.push(rustybuzz::Feature::new(Tag::from_bytes(b"vert"), 1, ..));
+            }
             rustybuzz::shape(face, &features, buf)
         };
         let kern_after = |i: usize| kerning.get(run.start + i + 1).copied().unwrap_or(style.kerning);
@@ -134,6 +180,12 @@ fn shape_span(
         let all_off = (0..run.chars.len()).all(|i| !kern_after(i));
         let shaped = shape(!all_off);
         let unkerned = (!all_on && !all_off).then(|| shape(false)).filter(|g| g.len() == shaped.len());
+        // Glyphs `vert` left alone, for corner punctuation.
+        let unsubstituted: Vec<u32> = if run.upright && run.chars.iter().any(|c| corner_punctuation(c.1)) {
+            text.chars().map(|c| face.glyph_index(c).map_or(0, |g| g.0 as u32)).collect()
+        } else {
+            vec![]
+        };
 
         let mut byte_to_char = vec![0usize; text.len() + 1];
         for (ci, (b, _)) in text.char_indices().enumerate() {
@@ -150,11 +202,13 @@ fn shape_span(
             let scale = style.size * caps_scale / upem;
             let item = &mut out[base + ci];
             if !ch.is_control() && !ch.is_whitespace() {
+                let corner = corner_punctuation(run.chars[ci].1) && unsubstituted.get(ci) == Some(&info.glyph_id);
                 item.glyphs.push(PlacedGlyph {
                     id: info.glyph_id as u16,
                     font,
                     dx: pen[ci] + pos.x_offset as f64 * scale * style.hscale,
                     dy: pos.y_offset as f64 * scale * style.vscale,
+                    corner,
                 });
             }
             let advance = pos.x_advance as f64 * scale * style.hscale;
@@ -179,6 +233,24 @@ fn same_span(a: &Style, b: &Style) -> bool {
         && a.tracking == b.tracking
         && a.hscale == b.hscale
         && a.caps == b.caps
+        && a.features == b.features
+}
+
+/// `styles` with synthetic superscript and subscript turned into size and baseline shift.
+fn effective_styles(styles: &[Style]) -> Vec<Style> {
+    styles
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            if s.synthetic_position != 0 {
+                let dir = if s.synthetic_position == 1 { 1.0 } else { -1.0 };
+                s.baseline_shift += dir * SYNTHETIC_SHIFT * s.size;
+                s.size *= SYNTHETIC_SCALE;
+                s.synthetic_position = 0;
+            }
+            s
+        })
+        .collect()
 }
 
 struct Line {
@@ -214,9 +286,9 @@ fn wrap(items: &[Item], start: usize, end: usize, width: impl Fn(bool) -> f64, f
     }
 }
 
-fn break_lines(tl: &TextLayer, items: &[Item]) -> Vec<Line> {
+fn break_lines(tl: &TextLayer, items: &[Item], box_bounds: Option<[f64; 4]>) -> Vec<Line> {
     let n = items.len();
-    let box_width = tl.box_bounds.map(|b| b[2] - b[0]);
+    let box_width = box_bounds.map(|b| b[2] - b[0]);
     let mut lines = vec![];
     let mut ps = 0;
     while ps < n {
@@ -251,7 +323,16 @@ fn break_lines(tl: &TextLayer, items: &[Item]) -> Vec<Line> {
 }
 
 /// Lays out a type layer: shaping, line breaking, alignment and warp, all in text space.
+///
+/// Vertical text is laid out as horizontal lines in a frame turned 90 degrees (lines become
+/// columns running right to left), with upright characters turned back.
 pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
+    let styles = effective_styles(&tl.styles);
+    let tl = &TextLayer { styles, ..tl.clone() };
+    let vertical = tl.vertical;
+    // In the turned frame u runs down the column and v leftward across columns: (x, y) = (-v, u).
+    let box_bounds = if vertical { tl.box_bounds.map(|b| [b[1], -b[2], b[3], -b[0]]) } else { tl.box_bounds };
+    let place = move |u: f64, v: f64| if vertical { (-v, u) } else { (u, v) };
     let mut faces = Faces::new(db);
     let mut missing_fonts: Vec<String> = vec![];
     let n = tl.chars.len();
@@ -268,10 +349,10 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
             missing_fonts.push(style.font.clone());
         }
         let kerning: Vec<bool> = tl.styles[i..(j + 1).min(n)].iter().map(|s| s.kerning).collect();
-        shape_span(&mut faces, &tl.chars[i..j], &kerning, style, primary, &mut items, i);
+        shape_span(&mut faces, &tl.chars[i..j], &kerning, style, primary, &mut items, i, vertical);
         i = j;
     }
-    let lines = break_lines(tl, &items);
+    let lines = break_lines(tl, &items, box_bounds);
     if lines.is_empty() {
         return Layout { glyphs: vec![], missing_fonts };
     }
@@ -286,6 +367,9 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
     };
     let ascent = |faces: &mut Faces, k: usize| {
         let s = &tl.styles[k];
+        if vertical {
+            return EM_ASCENT * s.size;
+        }
         db.find(&s.font)
             .and_then(|f| faces.get(f))
             .map_or(s.size * FALLBACK_ASCENT, |f| f.ascender() as f64 / f.units_per_em() as f64 * s.size)
@@ -299,8 +383,11 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
             if line.end > line.start { line.start..line.end } else { line.start.min(last)..line.start.min(last) + 1 };
         let para = &tl.paragraphs[line.start.min(last)];
         if li == 0 {
-            if let Some(b) = tl.box_bounds {
+            if let Some(b) = box_bounds {
                 y = b[1] + probe.clone().map(|k| ascent(&mut faces, k)).fold(0.0, f64::max);
+            } else if vertical {
+                // Point text: the first column is centered on the anchor.
+                y = probe.clone().map(|k| EM_CENTER * tl.styles[k].size).fold(0.0, f64::max);
             }
         } else {
             y += probe.clone().map(leading).fold(0.0, f64::max);
@@ -315,7 +402,7 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
         let width: f64 = items[line.start..end].iter().map(|it| it.advance).sum();
         let first_indent = if line.first { para.first_indent } else { 0.0 };
         let indent = para.start_indent + first_indent;
-        let (x0, extra_per_space) = match tl.box_bounds {
+        let (x0, extra_per_space) = match box_bounds {
             None => (indent - width * para.justification.offset(), 0.0),
             Some(b) => {
                 let free = b[2] - b[0] - para.start_indent - para.end_indent - first_indent - width;
@@ -338,11 +425,20 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
                 let (ox, oy) = (x + g.dx, y - g.dy - style.baseline_shift);
                 let (hs, vs) = (style.hscale, style.vscale);
                 let skew = if style.faux_italic { FAUX_ITALIC_SKEW } else { 0.0 };
+                // Upright glyphs in vertical text turn a quarter counterclockwise about their em box.
+                let turn = (vertical && upright(item.ch))
+                    .then(|| (x + item.advance / 2.0, y - style.baseline_shift - EM_CENTER * style.size));
+                let corner = if g.corner { CORNER_SHIFT * style.size } else { 0.0 };
                 let mut outline = Outline {
                     path: vec![],
                     f: |fx: f32, fy: f32| {
                         let (ux, uy) = (fx as f64 * scale * hs, fy as f64 * scale * vs);
-                        (ox + ux + skew * uy, oy - uy)
+                        let (u, v) = (ox + ux + skew * uy, oy - uy);
+                        let (u, v) = match turn {
+                            Some((cu, cv)) => (cu + (v - cv) - corner, cv - (u - cu) - corner),
+                            None => (u, v),
+                        };
+                        place(u, v)
                     },
                 };
                 face.outline_glyph(GlyphId(g.id), &mut outline);
@@ -359,7 +455,7 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
                         let (x1, y1) = (x + item.advance, yy + thickness);
                         let path =
                             vec![Seg::Move(x, yy), Seg::Line(x1, yy), Seg::Line(x1, y1), Seg::Line(x, y1), Seg::Close];
-                        glyphs.push(Glyph { path, color: style.color, bold: 0.0 });
+                        glyphs.push(Glyph { path: path::map(&path, place), color: style.color, bold: 0.0 });
                     }
                 }
             }

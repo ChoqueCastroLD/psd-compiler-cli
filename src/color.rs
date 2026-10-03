@@ -94,7 +94,8 @@ impl ColorSpace {
     /// Converts a finished straight-alpha RGBA8 image from the document's space to sRGB.
     pub fn finish(&self, rgba: &mut [u8]) {
         let Some((t, gray)) = &self.output else { return };
-        let src: Vec<u8> = if *gray { rgba.chunks_exact(4).flat_map(|p| [p[0], p[3]]).collect() } else { rgba.to_vec() };
+        let src: Vec<u8> =
+            if *gray { rgba.chunks_exact(4).flat_map(|p| [p[0], p[3]]).collect() } else { rgba.to_vec() };
         let _ = t.transform(&src, rgba);
     }
 }
@@ -205,11 +206,8 @@ mod tests {
         let cs = ColorSpace::default();
         let gray = desc(vec![("Gry ", Value::Number(100.0))]);
         assert_eq!(from_object(&gray, &cs), Some([0.0; 3]));
-        let hsb = desc(vec![
-            ("H   ", Value::Number(120.0)),
-            ("Strt", Value::Number(100.0)),
-            ("Brgh", Value::Number(100.0)),
-        ]);
+        let hsb =
+            desc(vec![("H   ", Value::Number(120.0)), ("Strt", Value::Number(100.0)), ("Brgh", Value::Number(100.0))]);
         assert_eq!(from_object(&hsb, &cs), Some([0.0, 1.0, 0.0]));
         assert_eq!(from_object(&desc(vec![]), &cs), None);
     }

@@ -63,6 +63,48 @@ pub(crate) struct Style {
     pub underline: bool,
     pub strikethrough: bool,
     pub color: [f32; 4],
+    /// OpenType features switched from their defaults, as `(tag, value)`.
+    pub features: Vec<([u8; 4], u32)>,
+    /// Synthetic superscript (1) or subscript (2).
+    pub synthetic_position: u8,
+}
+
+/// OpenType features Photoshop exposes as character style flags: key, tag, default.
+const FEATURE_FLAGS: [(&str, &[u8; 4], bool); 11] = [
+    ("Ligatures", b"liga", true),
+    ("Ligatures", b"clig", true),
+    ("DLigatures", b"dlig", false),
+    ("AltLigatures", b"hlig", false),
+    ("ContextualLigatures", b"calt", true),
+    ("OldStyle", b"onum", false),
+    ("Fractions", b"frac", false),
+    ("Ordinals", b"ordn", false),
+    ("Swash", b"swsh", false),
+    ("Titling", b"titl", false),
+    ("StylisticAlternates", b"salt", false),
+];
+
+/// The features of style properties `m` that differ from shaping defaults.
+fn features(m: &Props) -> Vec<([u8; 4], u32)> {
+    let mut out: Vec<([u8; 4], u32)> = FEATURE_FLAGS
+        .iter()
+        .filter_map(|&(key, tag, default)| {
+            let on = flag(m, key, default);
+            (on != default).then_some((*tag, on as u32))
+        })
+        .collect();
+    if flag(m, "Ornaments", false) {
+        out.push((*b"ornm", 1));
+    }
+    let position = match num(m, "FontOTPosition", 0.0) as i64 {
+        1 => Some(b"sups"),
+        2 => Some(b"subs"),
+        3 => Some(b"numr"),
+        4 => Some(b"dnom"),
+        _ => None,
+    };
+    out.extend(position.map(|t| (*t, 1)));
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -336,6 +378,8 @@ fn resolve_runs(editor: &Node, resources: &Node, n: usize) -> (Vec<Style>, Vec<P
             underline: flag(&m, "Underline", false),
             strikethrough: flag(&m, "Strikethrough", false),
             color: color(prop(&m, "FillColor")).unwrap_or([0.0, 0.0, 0.0, 1.0]),
+            features: features(&m),
+            synthetic_position: num(&m, "FontBaseline", 0.0).clamp(0.0, 2.0) as u8,
         });
     }
     (styles, paragraphs)

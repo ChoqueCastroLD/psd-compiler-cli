@@ -97,7 +97,10 @@ fn row_bytes(width: usize, depth: u16) -> usize {
 pub(crate) fn to_8bit(raw: Vec<u8>, width: usize, height: usize, depth: u16, linear: bool) -> Result<Vec<u8>> {
     Ok(match depth {
         8 => raw,
-        16 => raw.chunks_exact(2).map(|c| ((u16::from_be_bytes([c[0], c[1]]) as u32 * 255 + 32767) / 65535) as u8).collect(),
+        16 => raw
+            .chunks_exact(2)
+            .map(|c| ((u16::from_be_bytes([c[0], c[1]]) as u32 * 255 + 32767) / 65535) as u8)
+            .collect(),
         32 => raw
             .chunks_exact(4)
             .map(|c| {

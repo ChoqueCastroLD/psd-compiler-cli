@@ -1,6 +1,8 @@
 //! Vector masks and shape strokes: path records from `vmsk`/`vsms` rasterized with tiny-skia.
 
-use tiny_skia::{FillRule, LineCap, LineJoin, Mask, MaskType, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform};
+use tiny_skia::{
+    FillRule, LineCap, LineJoin, Mask, MaskType, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
+};
 
 use crate::psd::descriptor::{Descriptor, Value};
 use crate::psd::reader::Reader;

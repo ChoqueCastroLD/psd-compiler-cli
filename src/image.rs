@@ -179,7 +179,8 @@ impl Image {
             }
             #[cfg(feature = "avif")]
             Format::Avif => {
-                let px: Vec<ravif::RGBA8> = self.data.chunks_exact(4).map(|p| ravif::RGBA8::new(p[0], p[1], p[2], p[3])).collect();
+                let px: Vec<ravif::RGBA8> =
+                    self.data.chunks_exact(4).map(|p| ravif::RGBA8::new(p[0], p[1], p[2], p[3])).collect();
                 let img = ravif::Img::new(px.as_slice(), w as usize, h as usize);
                 let encoded = ravif::Encoder::new()
                     .with_quality(quality as f32)
@@ -200,7 +201,10 @@ impl Image {
         let format = match path.extension() {
             None => Format::Png,
             Some(_) => Format::from_path(path).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("unknown image format: {}", path.display()))
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unknown image format: {}", path.display()),
+                )
             })?,
         };
         std::fs::write(path, self.encode(format, options)?)
@@ -220,7 +224,9 @@ mod tests {
     }
 
     fn checker() -> Image {
-        let data = (0..64 * 48).flat_map(|i| if (i % 64 / 8 + i / 64 / 8) % 2 == 0 { [255, 0, 0, 255] } else { [0, 0, 255, 128] }).collect();
+        let data = (0..64 * 48)
+            .flat_map(|i| if (i % 64 / 8 + i / 64 / 8) % 2 == 0 { [255, 0, 0, 255] } else { [0, 0, 255, 128] })
+            .collect();
         Image { width: 64, height: 48, data }
     }
 

@@ -208,6 +208,11 @@ impl Layer {
         l
     }
 
+    pub fn block(mut self, key: &[u8; 4], data: Vec<u8>) -> Self {
+        self.blocks.push((*key, data));
+        self
+    }
+
     pub fn opacity(mut self, v: u8) -> Self {
         self.opacity = v;
         self
@@ -372,6 +377,9 @@ pub struct Text {
     pub warp: Option<(&'static str, f64)>,
     pub anti_alias: &'static str,
     pub leading: Option<f64>,
+    pub vertical: bool,
+    /// Extra EngineData style properties for every run.
+    pub style: &'static str,
 }
 
 fn engine_string(s: &str) -> Vec<u8> {
@@ -400,6 +408,8 @@ impl Text {
             warp: None,
             anti_alias: "AnCr",
             leading: None,
+            vertical: false,
+            style: "",
         }
     }
 
@@ -409,6 +419,16 @@ impl Text {
 
     pub fn center(mut self) -> Self {
         self.justification = 2;
+        self
+    }
+
+    pub fn vertical(mut self) -> Self {
+        self.vertical = true;
+        self
+    }
+
+    pub fn style(mut self, extra: &'static str) -> Self {
+        self.style = extra;
         self
     }
 
@@ -455,14 +475,15 @@ impl Text {
             };
             write!(
                 e,
-                " << /StyleSheet << /StyleSheetData << /Font {font} /FontSize {} {leading} /Tracking {} /FauxBold {} /Underline {} /FillColor << /Type 1 /Values [ 1.0 {} {} {} ] >> >> >> >>",
+                " << /StyleSheet << /StyleSheetData << /Font {font} /FontSize {} {leading} /Tracking {} /FauxBold {} /Underline {} /FillColor << /Type 1 /Values [ 1.0 {} {} {} ] >> {} >> >> >>",
                 r.size,
                 r.tracking,
                 r.faux_bold,
                 r.underline,
                 r.rgb[0] / 255.0,
                 r.rgb[1] / 255.0,
-                r.rgb[2] / 255.0
+                r.rgb[2] / 255.0,
+                self.style
             )
             .unwrap();
         }
@@ -471,7 +492,12 @@ impl Text {
             Some([l, t, r, b]) => format!("/ShapeType 1 /Cookie << /Photoshop << /BoxBounds [ {l} {t} {r} {b} ] >> >>"),
             None => "/ShapeType 0".into(),
         };
-        write!(e, "/Rendered << /Shapes << /WritingDirection 0 /Children [ << {shape} >> ] >> >>\n>>\n").unwrap();
+        write!(
+            e,
+            "/Rendered << /Shapes << /WritingDirection {} /Children [ << {shape} >> ] >> >>\n>>\n",
+            if self.vertical { 2 } else { 0 }
+        )
+        .unwrap();
         e.extend_from_slice(b"/ResourceDict << /FontSet [");
         for f in &fonts {
             e.extend_from_slice(b" << /Name ");

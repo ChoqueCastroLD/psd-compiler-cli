@@ -141,6 +141,27 @@ fn keep_text_uses_cached_pixels() {
 }
 
 #[test]
+fn unreadable_text_uses_cached_pixels() {
+    let layer = Layer::solid("t", 4, 4, 10, 10, [9, 9, 9, 255]).block(b"TySh", vec![0, 1, 2]);
+    let doc = Document::parse(&white(30, 30).layer(layer).build()).unwrap();
+    let out = render(&doc, &psd_compiler::FontDb::new(), &Default::default());
+    assert!(out.warnings.iter().any(|w| w.message.contains("cached pixels")), "{:?}", out.warnings);
+    assert_eq!(out.image.pixel(8, 8), [9, 9, 9, 255]);
+}
+
+#[test]
+fn huge_text_renders_in_bands_without_seams() {
+    let (db, font) = font_or_skip!();
+    // A glyph far taller than the canvas, so it is clipped and drawn across several bands.
+    let text = Text::new("I", font, 6000.0, [0.0; 3], 600.0, 3500.0);
+    let doc = Document::parse(&white(3000, 3000).layer(Layer::text("t", &text)).build()).unwrap();
+    let out = render(&doc, &db, &RenderOptions::default());
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    let x = (600..3000).find(|&x| out.image.pixel(x, 1500)[0] == 0).expect("stem");
+    assert!((0..3000).all(|y| out.image.pixel(x + 50, y)[0] == 0), "gap in the stem");
+}
+
+#[test]
 fn text_masks_cover_glyphs() {
     let (db, font) = font_or_skip!();
     let text = Text::new("Mask", font, 30.0, [0.0; 3], 10.0, 40.0);
@@ -181,4 +202,40 @@ fn set_text_renders_new_text() {
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     let after = extent(&ink(&out.image));
     assert!(after.2 > before.2 + 100, "{before:?} -> {after:?}");
+}
+
+#[test]
+fn vertical_text_runs_down_a_column() {
+    let (db, font) = font_or_skip!();
+    let text = Text::new("HELLO", font, 30.0, [0.0; 3], 100.0, 20.0).vertical();
+    let doc = Document::parse(&white(200, 220).layer(Layer::text("t", &text)).build()).unwrap();
+    let (x0, y0, x1, y1) = extent(&ink(&render(&doc, &db, &Default::default()).image));
+    assert!(y1 - y0 > 3 * (x1 - x0), "{x0},{y0}..{x1},{y1}");
+    assert!(x0 >= 80 && x1 <= 120, "column centered on the anchor: {x0}..{x1}");
+    assert!((18..=30).contains(&y0), "starts at the anchor: {y0}");
+}
+
+#[test]
+fn synthetic_superscript_is_smaller_and_raised() {
+    let (db, font) = font_or_skip!();
+    let plain = Text::new("H", font, 40.0, [0.0; 3], 20.0, 60.0);
+    let sup = Text::new("H", font, 40.0, [0.0; 3], 20.0, 60.0).style("/FontBaseline 1");
+    let ext = |t: &Text| {
+        let doc = Document::parse(&white(100, 100).layer(Layer::text("t", t)).build()).unwrap();
+        extent(&ink(&render(&doc, &db, &Default::default()).image))
+    };
+    let (a, b) = (ext(&plain), ext(&sup));
+    assert!(b.3 < a.3 - 8, "raised: {a:?} {b:?}");
+    assert!(b.3 - b.1 < (a.3 - a.1) * 3 / 4, "smaller: {a:?} {b:?}");
+}
+
+#[test]
+#[ignore = "writes /tmp/vertical-ja.png for a visual check"]
+fn vertical_japanese_preview() {
+    let mut db = psd_compiler::FontDb::new();
+    db.add_system_fonts();
+    let text = Text::new("縦書き「テスト」ABC。\nふたつめ", "WenQuanYiZenHei", 28.0, [0.0; 3], 150.0, 20.0).vertical();
+    let doc = Document::parse(&white(200, 360).layer(Layer::text("t", &text)).build()).unwrap();
+    let out = render(&doc, &db, &Default::default());
+    out.image.save_png("/tmp/vertical-ja.png", 2).unwrap();
 }

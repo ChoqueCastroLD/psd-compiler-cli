@@ -86,7 +86,12 @@ impl Gradient {
             }
             s
         }
-        Gradient { colors: build(colors, [0.0; 3]), alphas: build(alphas, 1.0), smooth: smooth.clamp(0.0, 1.0), linear: false }
+        Gradient {
+            colors: build(colors, [0.0; 3]),
+            alphas: build(alphas, 1.0),
+            smooth: smooth.clamp(0.0, 1.0),
+            linear: false,
+        }
     }
 
     fn noise(g: &Descriptor) -> Gradient {
@@ -103,7 +108,8 @@ impl Gradient {
         };
         let (lo, hi) = (limit("Mnm "), limit("Mxm "));
         let pick = |v: &[f64]| -> [f32; 3] {
-            let c = [v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0), v.get(3).copied().unwrap_or(0.0)];
+            let c =
+                [v.get(1).copied().unwrap_or(0.0), v.get(2).copied().unwrap_or(0.0), v.get(3).copied().unwrap_or(0.0)];
             match g.enumerated("ClrS") {
                 Some("HSBl") => color::hsb_to_rgb(c[0], c[1], c[2]).map(|x| x as f32),
                 Some("LbCl") => color::lab_to_rgb(c[0] * 100.0, c[1] * 255.0 - 128.0, c[2] * 255.0 - 128.0),
@@ -173,11 +179,14 @@ pub(crate) struct GradientFill {
 
 impl GradientFill {
     pub fn parse(d: &Descriptor, cs: &ColorSpace) -> GradientFill {
-        let offset = d.desc("Ofst").map_or((0.0, 0.0), |o| {
-            (o.num("Hrzn").unwrap_or(0.0) / 100.0, o.num("Vrtc").unwrap_or(0.0) / 100.0)
-        });
+        let offset = d
+            .desc("Ofst")
+            .map_or((0.0, 0.0), |o| (o.num("Hrzn").unwrap_or(0.0) / 100.0, o.num("Vrtc").unwrap_or(0.0) / 100.0));
         GradientFill {
-            gradient: d.desc("Grad").map(|g| Gradient::parse(g, cs)).unwrap_or_else(|| Gradient::parse(&Descriptor::default(), cs)),
+            gradient: d
+                .desc("Grad")
+                .map(|g| Gradient::parse(g, cs))
+                .unwrap_or_else(|| Gradient::parse(&Descriptor::default(), cs)),
             style: match d.enumerated("Type") {
                 Some("Rdl ") => Style::Radial,
                 Some("Angl") => Style::Angle,
@@ -239,7 +248,8 @@ impl PatternFill {
             Value::Text(t) => t.trim_end_matches('\0').to_string(),
             _ => return None,
         };
-        let phase = d.desc("phase").map_or((0.0, 0.0), |o| (o.num("Hrzn").unwrap_or(0.0), o.num("Vrtc").unwrap_or(0.0)));
+        let phase =
+            d.desc("phase").map_or((0.0, 0.0), |o| (o.num("Hrzn").unwrap_or(0.0), o.num("Vrtc").unwrap_or(0.0)));
         Some(PatternFill {
             id,
             scale: (d.num("Scl ").unwrap_or(100.0) / 100.0).max(0.001),
@@ -311,7 +321,16 @@ impl Fill {
     /// Paints the fill over the document rectangle `(x, y, w, h)` with coverage `cov` (or full).
     ///
     /// `bounds` is the box an aligned gradient or pattern is laid out on.
-    pub fn render(&self, doc: &Document, x: i32, y: i32, w: usize, h: usize, cov: Option<&[f32]>, bounds: [f64; 4]) -> Raster {
+    pub fn render(
+        &self,
+        doc: &Document,
+        x: i32,
+        y: i32,
+        w: usize,
+        h: usize,
+        cov: Option<&[f32]>,
+        bounds: [f64; 4],
+    ) -> Raster {
         let mut r = Raster { x, y, w, h, px: vec![0.0; w * h * 4] };
         let canvas = [0.0, 0.0, doc.width as f64, doc.height as f64];
         let sample: Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> = match self {

@@ -99,7 +99,8 @@ fn parse_format(s: &str) -> Result<Format, String> {
 
 fn parse_color(s: &str) -> Result<[u8; 3], String> {
     let hex = s.trim_start_matches('#');
-    let v = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6).ok_or_else(|| format!("{s:?} is not RRGGBB"))?;
+    let v =
+        u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6).ok_or_else(|| format!("{s:?} is not RRGGBB"))?;
     Ok([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
 
@@ -179,7 +180,8 @@ fn compile(cli: &Cli, fonts: &FontDb, input: &Path) -> Result<()> {
     let rendered = render(&doc, fonts, &options);
     let drawn = ms(start);
     let encode = EncodeOptions { compression: cli.compression, quality: cli.quality, background: cli.background };
-    let bytes = rendered.image.encode(format, &encode).with_context(|| format!("cannot encode {}", output.display()))?;
+    let bytes =
+        rendered.image.encode(format, &encode).with_context(|| format!("cannot encode {}", output.display()))?;
     std::fs::write(&output, bytes).with_context(|| format!("cannot write {}", output.display()))?;
     if let Some(dir) = &cli.text_masks {
         let stem = input.file_stem().unwrap_or_default().to_string_lossy();

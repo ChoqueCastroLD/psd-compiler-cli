@@ -255,7 +255,8 @@ pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects
             invert: d.bool("Invr").unwrap_or(true),
         })
         .collect();
-    let overlay = |d: &Descriptor| Overlay { fill: Fill::parse(d, cs), opacity: opacity(d, 100.0), mode: mode(d, "Nrml") };
+    let overlay =
+        |d: &Descriptor| Overlay { fill: Fill::parse(d, cs), opacity: opacity(d, 100.0), mode: mode(d, "Nrml") };
     e.color_overlays = enabled(fx, "SoFi", "solidFillMulti").into_iter().map(overlay).collect();
     e.gradient_overlays = enabled(fx, "GrFl", "gradientFillMulti")
         .into_iter()
@@ -364,10 +365,13 @@ impl Effects {
         let strokes = self.strokes.iter().map(|s| s.size);
         let bevels = self.bevels.iter().map(|b| b.size + b.soften);
         let any = !self.is_empty();
-        shadows.chain(glows).chain(satins).chain(strokes).chain(bevels).map(|r| r + 2.0).fold(
-            if any { 2.0 } else { 0.0 },
-            f64::max,
-        )
+        shadows
+            .chain(glows)
+            .chain(satins)
+            .chain(strokes)
+            .chain(bevels)
+            .map(|r| r + 2.0)
+            .fold(if any { 2.0 } else { 0.0 }, f64::max)
     }
 
     fn max_distance(&self) -> f64 {
@@ -519,11 +523,8 @@ impl Effects {
             let inside = downsample(|i| d.inside[i] && inner_r > 0.0 && d.inward[i] <= inner_r * inner_r, w, h);
             let band = downsample(|i| !d.inside[i] && outer_r > 0.0 && d.outside[i] <= outer_r * outer_r, w, h);
             let tint = fill_tint(&s.fill);
-            let share: Vec<f32> = inside
-                .iter()
-                .zip(a)
-                .map(|(&v, &r)| if r > 1e-6 { (v.min(r) / r).min(1.0) } else { 0.0 })
-                .collect();
+            let share: Vec<f32> =
+                inside.iter().zip(a).map(|(&v, &r)| if r > 1e-6 { (v.min(r) / r).min(1.0) } else { 0.0 }).collect();
             if inner_r > 0.0 {
                 p.inner.push(Layered { cov: share, tint: tint.clone(), mode: s.mode, opacity: s.opacity });
             }
@@ -574,7 +575,9 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
             let s = if inside { din } else { -dout };
             ramp(0.5 + s / size)
         }),
-        BevelStyle::Pillow => field(d, w, h, |inside, dout, din| if inside { ramp(din / size) } else { ramp(dout / size) }),
+        BevelStyle::Pillow => {
+            field(d, w, h, |inside, dout, din| if inside { ramp(din / size) } else { ramp(dout / size) })
+        }
     };
     if b.smooth {
         let s = size as f64 * 0.5;
@@ -592,7 +595,8 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
     let flat = light[2];
     let mut hi = vec![0f32; w * h];
     let mut lo = vec![0f32; w * h];
-    let at = |x: isize, y: isize| height[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
+    let at =
+        |x: isize, y: isize| height[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
     for y in 0..h as isize {
         for x in 0..w as isize {
             let gx = (at(x + 1, y) - at(x - 1, y)) * 0.5 * lift;
@@ -657,7 +661,11 @@ mod tests {
     }
 
     fn rgb(r: f64, g: f64, b: f64) -> Value {
-        Value::Descriptor(desc(vec![("Rd  ", Value::Number(r)), ("Grn ", Value::Number(g)), ("Bl  ", Value::Number(b))]))
+        Value::Descriptor(desc(vec![
+            ("Rd  ", Value::Number(r)),
+            ("Grn ", Value::Number(g)),
+            ("Bl  ", Value::Number(b)),
+        ]))
     }
 
     fn doc() -> Document {
@@ -742,7 +750,13 @@ mod tests {
     fn strokes_split_inside_and_beside() {
         let (w, h) = (21, 21);
         let a = square(w, h, 8, 13);
-        let stroke = |size, position| Stroke { fill: Fill::Solid([1.0; 3]), opacity: 1.0, mode: BlendMode::Normal, size, position };
+        let stroke = |size, position| Stroke {
+            fill: Fill::Solid([1.0; 3]),
+            opacity: 1.0,
+            mode: BlendMode::Normal,
+            size,
+            position,
+        };
         let area = |v: &[f32]| v.iter().sum::<f32>();
         let e = Effects { strokes: vec![stroke(2.0, StrokePosition::Outside)], ..Default::default() };
         let p = e.prepare(&doc(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
@@ -804,7 +818,8 @@ mod tests {
     #[test]
     fn assemble_folds_overlays_and_fill() {
         let content = Raster { x: 0, y: 0, w: 1, h: 1, px: vec![1.0, 0.0, 0.0, 1.0] };
-        let overlay = Layered { cov: vec![1.0], tint: Tint::Solid([0.0, 0.0, 1.0]), mode: BlendMode::Normal, opacity: 0.5 };
+        let overlay =
+            Layered { cov: vec![1.0], tint: Tint::Solid([0.0, 0.0, 1.0]), mode: BlendMode::Normal, opacity: 0.5 };
         let out = assemble(&content, &[1.0], 1.0, 1.0, &[overlay.clone()]);
         assert_eq!(out.px, [0.5, 0.0, 0.5, 1.0]);
         let out = assemble(&content, &[1.0], 0.0, 1.0, &[overlay]);

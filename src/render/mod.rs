@@ -282,9 +282,8 @@ impl Comp {
                 let alpha = a0 + ga - a0 * ga;
                 let p = &mut self.cv.px[i * 4..i * 4 + 4];
                 for c in 0..3 {
-                    let numer = (1.0 - shape) * p[c]
-                        + (shape - a_s) * ko[c]
-                        + a_s * ((1.0 - a_ko) * cs[c] + a_ko * mixed[c]);
+                    let numer =
+                        (1.0 - shape) * p[c] + (shape - a_s) * ko[c] + a_s * ((1.0 - a_ko) * cs[c] + a_ko * mixed[c]);
                     p[c] = if alpha > 1e-6 { (numer / alpha).clamp(0.0, 1.0) * alpha } else { 0.0 };
                 }
                 p[3] = alpha;
@@ -298,7 +297,12 @@ impl Comp {
         move |x, y| if self.adjust_isolated { w(x, y) * self.sg[self.at(x, y)] } else { w(x, y) }
     }
 
-    fn adjust(&mut self, f: &(dyn Fn([f32; 3]) -> [f32; 3] + Sync), mode: BlendMode, w: impl Fn(i32, i32) -> f32 + Sync) {
+    fn adjust(
+        &mut self,
+        f: &(dyn Fn([f32; 3]) -> [f32; 3] + Sync),
+        mode: BlendMode,
+        w: impl Fn(i32, i32) -> f32 + Sync,
+    ) {
         let mut cv = std::mem::take(&mut self.cv);
         cv.adjust(f, mode, self.weight(w));
         self.cv = cv;
@@ -375,7 +379,8 @@ impl Compositor<'_> {
                 if let Some(f) = &out.adjust {
                     self.draw_adjustment(l, f, &out.mask, clips, comp);
                 } else if let Some(content) = out.content {
-                    let source = Source { content, coverage: out.coverage, effects: out.effects, prepared: out.prepared };
+                    let source =
+                        Source { content, coverage: out.coverage, effects: out.effects, prepared: out.prepared };
                     self.draw_source(l, l.blend_mode, source, clips, comp);
                 }
             }
@@ -429,7 +434,8 @@ impl Compositor<'_> {
                 return;
             }
             let isolate = f < 1.0 || !clips.is_empty() || !effects.is_empty();
-            let mut sub = Comp::new(comp.rect(), Some(comp.cv.clone()), comp.deep.clone(), comp.adjust_isolated || isolate);
+            let mut sub =
+                Comp::new(comp.rect(), Some(comp.cv.clone()), comp.deep.clone(), comp.adjust_isolated || isolate);
             self.composite(children, &mut sub, true);
             if !isolate {
                 let m = |x: i32, y: i32| mask.at(x, y) * o;
