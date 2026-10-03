@@ -140,3 +140,47 @@ fn cli_writes_psd_and_keeps_the_input() {
     assert!(String::from_utf8_lossy(&same.stderr).contains("refusing to overwrite"));
     assert_eq!(std::fs::read(&input).unwrap(), original);
 }
+
+#[test]
+fn edited_text_is_written_in_every_color_mode() {
+    let Some((db, font)) = test_font() else { return };
+    // Planar: 256 reds, greens, then blues.
+    let gray_palette: Vec<u8> = (0..3).flat_map(|_| 0..=255u8).collect();
+    // Header mode, depth, color mode data, white background channels and the tolerance.
+    type Case = (&'static str, u16, u16, Vec<u8>, [u8; 4], u8);
+    let cases: [Case; 5] = [
+        ("CMYK", 4, 8, vec![], [255; 4], 2),
+        ("Lab", 9, 16, vec![], [255, 128, 128, 255], 3),
+        ("gray 32-bit", 1, 32, vec![], [255; 4], 1),
+        ("duotone", 8, 8, vec![], [255; 4], 1),
+        ("indexed", 2, 8, gray_palette, [255; 4], 1),
+    ];
+    for (name, mode, depth, color_data, white, tolerance) in cases {
+        let mut psd = Psd::new(120, 60)
+            .layer(Layer::solid("bg", 0, 0, 120, 60, white).channel(3, vec![255; 120 * 60]))
+            .layer(Layer::text("Title", &Text::new("I", font, 40.0, [0.0; 3], 10.0, 45.0)).channel(3, vec![]));
+        (psd.mode, psd.depth, psd.color_data) = (mode, depth, color_data);
+        let original = psd.build();
+        let mut doc = Document::parse(&original).unwrap();
+        doc.set_text("Title", "WWWW").unwrap();
+        let expected = render(&doc, &db, &Default::default()).image;
+        let (out, _) = doc.to_psd(&original, &db, &Default::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let written = Document::parse(&out).unwrap();
+        let got = render(&written, &FontDb::new(), &cached()).image;
+        assert!(diff(&got, &expected) <= tolerance, "{name}: off by {}", diff(&got, &expected));
+        let ink = (0..120).filter(|&x| got.pixel(x, 30)[0] < 128).count();
+        assert!(ink > 40, "{name}: only {ink} dark pixels");
+    }
+}
+
+#[test]
+fn bitmap_documents_cannot_be_written() {
+    let Some((db, font)) = test_font() else { return };
+    let mut psd = Psd::new(8, 8).layer(Layer::text("Title", &Text::new("I", font, 8.0, [0.0; 3], 1.0, 7.0)));
+    psd.mode = 7;
+    let original = psd.build();
+    let mut doc = Document::parse(&original).unwrap();
+    doc.set_text("Title", "W").unwrap();
+    let err = doc.to_psd(&original, &db, &Default::default()).unwrap_err();
+    assert!(err.to_string().contains("not supported"), "{err}");
+}

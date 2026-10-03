@@ -253,6 +253,13 @@ impl Layer {
         Layer::solid(name, l, t, (r - l) as usize, (b - t) as usize, cached).block(b"SoLd", so.0)
     }
 
+    /// Sets channel `id` (empty for an empty layer's channel).
+    pub fn channel(mut self, id: i16, data: Vec<u8>) -> Self {
+        self.channels.retain(|c| c.0 != id);
+        self.channels.push((id, data));
+        self
+    }
+
     pub fn block(mut self, key: &[u8; 4], data: Vec<u8>) -> Self {
         self.blocks.push((*key, data));
         self
@@ -644,6 +651,9 @@ pub struct Psd {
     pub height: u32,
     pub psb: bool,
     pub depth: u16,
+    /// Color mode as stored in the header (3 = RGB) and its color mode data.
+    pub mode: u16,
+    pub color_data: Vec<u8>,
     pub layers: Vec<Layer>,
     pub composite: Option<[u8; 3]>,
     pub global_angle: Option<i32>,
@@ -660,6 +670,8 @@ impl Psd {
             height,
             psb: false,
             depth: 8,
+            mode: 3,
+            color_data: vec![],
             layers: vec![],
             composite: None,
             global_angle: None,
@@ -674,10 +686,20 @@ impl Psd {
         self
     }
 
+    /// Color channels of the color mode.
+    fn colors(&self) -> usize {
+        match self.mode {
+            3 | 9 => 3,
+            4 => 4,
+            _ => 1,
+        }
+    }
+
     /// Samples at the document depth, big-endian.
     fn samples(&self, v: &[u8]) -> Vec<u8> {
         match self.depth {
             16 => v.iter().flat_map(|&s| (s as u16 * 257).to_be_bytes()).collect(),
+            32 => v.iter().flat_map(|&s| (s as f32 / 255.0).to_be_bytes()).collect(),
             _ => v.to_vec(),
         }
     }
@@ -736,12 +758,13 @@ impl Psd {
         b.raw(b"8BPS");
         b.u16(if self.psb { 2 } else { 1 });
         b.raw(&[0; 6]);
-        b.u16(3);
+        b.u16(self.colors() as u16);
         b.u32(self.height);
         b.u32(self.width);
         b.u16(self.depth);
-        b.u16(3);
-        b.u32(0);
+        b.u16(self.mode);
+        b.u32(self.color_data.len() as u32);
+        b.raw(&self.color_data);
 
         let mut res = Buf(vec![]);
         if let Some(angle) = self.global_angle {
@@ -898,7 +921,8 @@ impl Psd {
         b.u16(1);
         let (w, h) = (self.width as usize, self.height as usize);
         let rgb = self.composite.unwrap_or([255; 3]);
-        let rows: Vec<Vec<u8>> = rgb.iter().map(|&c| packbits(&self.samples(&vec![c; w]))).collect();
+        let planes: Vec<u8> = if self.mode == 3 { rgb.to_vec() } else { vec![255; self.colors()] };
+        let rows: Vec<Vec<u8>> = planes.iter().map(|&c| packbits(&self.samples(&vec![c; w]))).collect();
         for r in &rows {
             for _ in 0..h {
                 if self.psb {

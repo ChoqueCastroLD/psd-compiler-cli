@@ -5,7 +5,8 @@
 use std::collections::HashMap;
 
 use super::reader::Reader;
-use super::{Document, Rect, LONG_KEYS};
+use super::{ColorMode, Document, Rect, LONG_KEYS};
+use crate::color::{self, ColorSpace};
 use crate::error::{bail, Result};
 
 /// New pixels for one layer: straight 8-bit RGBA over `rect`.
@@ -112,9 +113,10 @@ fn packbits(row: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Encodes `planes` (8-bit, `w` x `h` each) as one compressed block: RLE for 8-bit documents,
-/// raw otherwise. Counts of all planes come first, as in the composite and in layer channels.
-fn encode_planes(planes: &[Vec<u8>], w: usize, h: usize, depth: u16, psb: bool) -> Result<Vec<u8>> {
+/// Encodes `planes` (values in 0..=1, `w` x `h` each) as one compressed block: RLE for 8-bit
+/// documents, raw otherwise. Counts of all planes come first, as in the composite and in layer
+/// channels.
+fn encode_planes(planes: &[Vec<f32>], w: usize, h: usize, depth: u16, psb: bool) -> Result<Vec<u8>> {
     let mut out = Out { data: vec![], psb };
     match depth {
         8 => {
@@ -123,8 +125,9 @@ fn encode_planes(planes: &[Vec<u8>], w: usize, h: usize, depth: u16, psb: bool) 
                 .iter()
                 .flat_map(|p| p.chunks(w.max(1)).take(h))
                 .map(|r| {
+                    let r: Vec<u8> = r.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
                     let mut v = vec![];
-                    packbits(r, &mut v);
+                    packbits(&r, &mut v);
                     v
                 })
                 .collect();
@@ -141,7 +144,13 @@ fn encode_planes(planes: &[Vec<u8>], w: usize, h: usize, depth: u16, psb: bool) 
         16 => {
             out.u16(0);
             for p in planes {
-                p.iter().for_each(|&v| out.u16(v as u16 * 257));
+                p.iter().for_each(|&v| out.u16((v.clamp(0.0, 1.0) * 65535.0).round() as u16));
+            }
+        }
+        32 => {
+            out.u16(0);
+            for p in planes {
+                p.iter().for_each(|&v| out.raw(&v.to_be_bytes()));
             }
         }
         d => bail!("writing {d}-bit documents is not supported"),
@@ -149,15 +158,76 @@ fn encode_planes(planes: &[Vec<u8>], w: usize, h: usize, depth: u16, psb: bool) 
     Ok(out.data)
 }
 
-/// The channel planes for straight RGBA: alpha (-1) and the color channels.
-fn plane(rgba: &[u8], id: i16, gray: bool) -> Option<Vec<u8>> {
-    let c = match id {
-        -1 => 3,
-        0..=2 if !gray => id as usize,
-        0 if gray => 0,
-        _ => return None,
-    };
-    Some(rgba.chunks_exact(4).map(|p| p[c]).collect())
+/// The color channels of the document for straight RGBA in the renderer's output space (the
+/// document's own for RGB, grayscale, duotone and indexed; sRGB for CMYK and Lab), as stored:
+/// values in 0..=1, CMYK inverted, 32-bit colors in linear light.
+fn color_planes(doc: &Document, cs: &ColorSpace, rgba: &[u8]) -> Vec<Vec<f32>> {
+    let n = rgba.len() / 4;
+    let unit = |v: u8| v as f32 / 255.0;
+    let mut planes = vec![Vec::with_capacity(n); doc.color_mode.channels().min(4)];
+    match doc.color_mode {
+        ColorMode::Cmyk => {
+            let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            let mut ink = vec![0u8; n * 4];
+            cs.rgb_to_cmyk(&rgb, &mut ink);
+            for p in ink.chunks_exact(4) {
+                for c in 0..4 {
+                    planes[c].push(unit(255 - p[c]));
+                }
+            }
+        }
+        ColorMode::Lab => {
+            for p in rgba.chunks_exact(4) {
+                let [l, a, b] = color::rgb_to_lab([0, 1, 2].map(|c| p[c] as f64 / 255.0));
+                planes[0].push((l / 100.0) as f32);
+                planes[1].push(((a + 128.0) / 255.0) as f32);
+                planes[2].push(((b + 128.0) / 255.0) as f32);
+            }
+        }
+        ColorMode::Indexed => {
+            let index = |p: &[u8]| -> u8 {
+                if p[3] < 128 {
+                    if let Some(t) = doc.transparent_index {
+                        return t;
+                    }
+                }
+                let d = |c: &[u8; 3]| (0..3).map(|i| (c[i] as i32 - p[i] as i32).pow(2)).sum::<i32>();
+                (0..doc.palette.len()).min_by_key(|&i| d(&doc.palette[i])).unwrap_or(0) as u8
+            };
+            let mut seen: HashMap<[u8; 4], u8> = HashMap::new();
+            planes[0] = rgba
+                .chunks_exact(4)
+                .map(|p| unit(*seen.entry([p[0], p[1], p[2], (p[3] >= 128) as u8]).or_insert_with(|| index(p))))
+                .collect();
+        }
+        ColorMode::Rgb => {
+            for p in rgba.chunks_exact(4) {
+                for c in 0..3 {
+                    planes[c].push(unit(p[c]));
+                }
+            }
+        }
+        _ => planes[0] = rgba.chunks_exact(4).map(|p| unit(p[0])).collect(),
+    }
+    if doc.depth == 32 {
+        for v in planes.iter_mut().flatten() {
+            *v = color::srgb_decode(*v as f64) as f32;
+        }
+    }
+    planes
+}
+
+/// The planes of layer channels `ids` for straight RGBA: alpha (-1) and the color channels; `None`
+/// for channels kept as they are (masks).
+fn layer_planes(doc: &Document, cs: &ColorSpace, rgba: &[u8], ids: &[i16]) -> Vec<Option<Vec<f32>>> {
+    let mut colors = color_planes(doc, cs, rgba);
+    ids.iter()
+        .map(|&id| match id {
+            -1 => Some(rgba.chunks_exact(4).map(|p| p[3] as f32 / 255.0).collect()),
+            0.. => colors.get_mut(id as usize).map(std::mem::take),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Writes `doc`, parsed from `original`, with `edits` applied.
@@ -273,7 +343,7 @@ fn layer_info(data: &[u8], psb: bool, doc: &Document, edits: &Edits) -> Result<(
     let channel_start = r.pos;
     let mut out = Out { data: vec![], psb };
     out.raw(&count.to_be_bytes());
-    let gray = matches!(doc.color_mode, super::ColorMode::Grayscale);
+    let cs = ColorSpace::new(doc);
     let mut new_channels: Vec<Vec<Option<Vec<u8>>>> = Vec::with_capacity(n);
     for (i, rec) in records.iter().enumerate() {
         let Some(px) = edits.layers.get(&i) else {
@@ -282,10 +352,10 @@ fn layer_info(data: &[u8], psb: bool, doc: &Document, edits: &Edits) -> Result<(
             continue;
         };
         let (w, h) = (px.rect.width(), px.rect.height());
-        let chans: Vec<Option<Vec<u8>>> = rec
-            .channels
-            .iter()
-            .map(|&(id, _)| plane(&px.rgba, id, gray).map(|p| encode_planes(&[p], w, h, doc.depth, psb)).transpose())
+        let ids: Vec<i16> = rec.channels.iter().map(|c| c.0).collect();
+        let chans: Vec<Option<Vec<u8>>> = layer_planes(doc, &cs, &px.rgba, &ids)
+            .into_iter()
+            .map(|p| p.map(|p| encode_planes(&[p], w, h, doc.depth, psb)).transpose())
             .collect::<Result<_>>()?;
         let rect = px.rect;
         for v in [rect.top, rect.left, rect.bottom, rect.right] {
@@ -406,22 +476,22 @@ fn linked(data: &[u8], edits: &Edits) -> Result<Vec<u8>> {
 /// matte), then the transparency channel or the document's own alpha channels.
 fn composite(doc: &Document, rgba: &[u8], transparency: bool, psb: bool) -> Result<Vec<u8>> {
     let (w, h) = (doc.width as usize, doc.height as usize);
-    let gray = matches!(doc.color_mode, super::ColorMode::Grayscale);
-    let color = if gray { 1 } else { 3 };
-    let flat = |c: usize| -> Vec<u8> {
-        rgba.chunks_exact(4)
-            .map(|p| {
-                let a = p[3] as u32;
-                ((p[c] as u32 * a + 255 * (255 - a) + 127) / 255) as u8
-            })
-            .collect()
-    };
-    let mut planes: Vec<Vec<u8>> = (0..color).map(flat).collect();
+    let flat: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let a = p[3] as u32;
+            let c = |v: u8| ((v as u32 * a + 255 * (255 - a) + 127) / 255) as u8;
+            [c(p[0]), c(p[1]), c(p[2]), 255]
+        })
+        .collect();
+    let mut planes = color_planes(doc, &ColorSpace::new(doc), &flat);
+    let color = planes.len();
+    let unit = |p: &[u8]| p.iter().map(|&v| v as f32 / 255.0).collect::<Vec<f32>>();
     for c in color..doc.channel_count as usize {
         planes.push(match doc.composite.get(c) {
-            _ if c == color && transparency => rgba.chunks_exact(4).map(|p| p[3]).collect(),
-            Some(p) if p.len() == w * h => p.clone(),
-            _ => vec![0; w * h],
+            _ if c == color && transparency => rgba.chunks_exact(4).map(|p| p[3] as f32 / 255.0).collect(),
+            Some(p) if p.len() == w * h => unit(p),
+            _ => vec![0.0; w * h],
         });
     }
     encode_planes(&planes, w, h, doc.depth, psb)

@@ -15,6 +15,8 @@ use crate::psd::{ColorMode, Document};
 #[derive(Clone, Default)]
 pub(crate) struct ColorSpace {
     cmyk: Option<Arc<Transform8BitExecutor>>,
+    /// sRGB to CMYK ink, for writing CMYK documents.
+    to_cmyk: Option<Arc<Transform8BitExecutor>>,
     output: Option<(Arc<Transform8BitExecutor>, bool)>,
     /// Descriptor colors are linear light (32-bit documents).
     linear: bool,
@@ -51,6 +53,7 @@ impl ColorSpace {
         match doc.color_mode {
             ColorMode::Cmyk => {
                 cs.cmyk = profile.create_transform_8bit(Layout::Rgba, &srgb, Layout::Rgb, options()).ok();
+                cs.to_cmyk = srgb.create_transform_8bit(Layout::Rgb, &profile, Layout::Rgba, options()).ok();
             }
             ColorMode::Rgb => {
                 cs.output = profile
@@ -86,6 +89,23 @@ impl ColorSpace {
             let k = 255 - s[3] as u32;
             for c in 0..3 {
                 d[c] = ((255 - s[c] as u32) * k / 255) as u8;
+            }
+        }
+    }
+
+    /// Converts interleaved sRGB to CMYK ink values (0 = no ink): through the document's profile,
+    /// else the naive inverse of [`ColorSpace::cmyk_to_rgb`].
+    pub fn rgb_to_cmyk(&self, rgb: &[u8], cmyk: &mut [u8]) {
+        if let Some(t) = &self.to_cmyk {
+            if t.transform(rgb, cmyk).is_ok() {
+                return;
+            }
+        }
+        for (s, d) in rgb.chunks_exact(3).zip(cmyk.chunks_exact_mut(4)) {
+            let max = s.iter().copied().max().unwrap_or(0) as u32;
+            d[3] = (255 - max) as u8;
+            for c in 0..3 {
+                d[c] = (s[c] as u32 * 255 + max / 2).checked_div(max).map_or(0, |v| (255 - v) as u8);
             }
         }
     }
@@ -332,6 +352,16 @@ mod tests {
         assert_eq!(t[255], [255, 255, 255]);
         assert_eq!(t[128][0], 255);
         assert!((126..=129).contains(&t[128][1]), "{:?}", t[128]);
+    }
+
+    #[test]
+    fn naive_cmyk_roundtrip() {
+        let cs = ColorSpace::default();
+        let rgb = [200u8, 30, 90, 0, 0, 0, 255, 255, 255];
+        let (mut ink, mut back) = ([0u8; 12], [0u8; 9]);
+        cs.rgb_to_cmyk(&rgb, &mut ink);
+        cs.cmyk_to_rgb(&ink, &mut back);
+        assert!(rgb.iter().zip(&back).all(|(a, b)| a.abs_diff(*b) <= 1), "{back:?}");
     }
 
     #[test]

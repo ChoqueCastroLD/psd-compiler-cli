@@ -62,7 +62,7 @@ struct Cli {
     #[arg(long)]
     keep_text: bool,
 
-    /// Re-render smart objects from their embedded or linked PSD, PNG or JPEG instead of the cached pixels. Linked files are looked up by relative path next to the input, then by absolute path.
+    /// Re-render smart objects from their embedded or linked PSD, PNG or JPEG instead of the cached pixels, applying their smart filters. Linked files are looked up by relative path next to the input, then by absolute path.
     /// Smart objects edited with --set-text are always re-rendered.
     #[arg(long)]
     render_smart_objects: bool,

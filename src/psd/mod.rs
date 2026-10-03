@@ -31,7 +31,7 @@ pub enum ColorMode {
     Cmyk,
     /// Independent ink channels.
     Multichannel,
-    /// One to four inks over a grayscale channel (rendered as grayscale).
+    /// One to four inks over a grayscale channel.
     Duotone,
     /// CIE L*a*b*.
     Lab,
@@ -826,8 +826,14 @@ impl Document {
         if !self.layers.iter().any(|l| l.edited) && self.edited.is_empty() {
             return Ok((original.to_vec(), vec![]));
         }
-        if !matches!(self.color_mode, ColorMode::Rgb | ColorMode::Grayscale) || !matches!(self.depth, 8 | 16) {
-            bail!("writing PSD supports 8- and 16-bit RGB and grayscale documents");
+        let supported = match self.color_mode {
+            ColorMode::Rgb | ColorMode::Grayscale => matches!(self.depth, 8 | 16 | 32),
+            ColorMode::Cmyk | ColorMode::Lab | ColorMode::Duotone => matches!(self.depth, 8 | 16),
+            ColorMode::Indexed => self.depth == 8,
+            ColorMode::Bitmap | ColorMode::Multichannel => false,
+        };
+        if !supported {
+            bail!("writing {}-bit {:?} documents is not supported", self.depth, self.color_mode);
         }
         let (edits, warnings) = crate::render::save::psd_edits(self, fonts, options)?;
         Ok((write::write(original, self, &edits)?, warnings))
