@@ -1,5 +1,7 @@
 //! Rasterizes one leaf layer: its content (pixels, text or synthesized fill), mask and effects.
 
+use std::sync::Arc;
+
 use rayon::prelude::*;
 
 use super::adjust::{self, ColorFn};
@@ -20,7 +22,7 @@ use crate::text::{layout, AntiAlias, TextLayer};
 /// Pixels per band when drawing type.
 const TEXT_BAND_PIXELS: usize = 1 << 22;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LayerOutput {
     /// Premultiplied pixels with the layer's raw alpha, padded for its effects.
     pub content: Option<Raster>,
@@ -30,7 +32,7 @@ pub(crate) struct LayerOutput {
     pub coverage: Vec<f32>,
     pub effects: Effects,
     pub prepared: Prepared,
-    pub adjust: Option<ColorFn>,
+    pub adjust: Option<Arc<ColorFn>>,
     pub warnings: Vec<String>,
     pub text_mask: Option<TextMask>,
 }
@@ -403,7 +405,7 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
     let mut out = LayerOutput::default();
     if l.kind == LayerKind::Adjustment {
         match adjust::parse(l, cs, doc.color_mode, doc.depth) {
-            Ok(f) => out.adjust = Some(f),
+            Ok(f) => out.adjust = Some(Arc::new(f)),
             Err(e) => out.warnings.push(format!("{e}; skipped")),
         }
         out.mask = mask::region(doc, l, true);

@@ -23,9 +23,9 @@ the files are committed here.
 
 | Suite | Match |
 |---|---|
-| psd-tools `tests/psd_files` | 263 / 274 (96.0%) |
+| psd-tools `tests/psd_files` | 264 / 274 (96.4%) |
 | ag-psd `test` | 71 / 76 (93.4%) |
-| Both | 334 / 350 (95.4%) |
+| Both | 335 / 350 (95.7%) |
 
 ### Misses
 
@@ -36,7 +36,6 @@ the files are committed here.
 | `adjustments/brightnesscontrast_*.psd` | Non-legacy brightness/contrast is a fitted curve, off by about 4/255 on average. |
 | `fill_adjustments.psd` | A long chain of adjustment layers; the error builds up through it. |
 | `effects/blend-modes.psd`, `effects/effect-enums.psd`, `effects/shape-fx2.psd` | Effect edges off by one pixel in places (1–4% of pixels). |
-| `passthrough_fill_blendmode.psd` | Pass-through group with fill opacity and blend modes inside. |
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
 | ag-psd `read-write/strokes`, `multiple-strokes-test.psd` | Several strokes on one layer, and stroke edges at sharp corners. |
@@ -71,6 +70,9 @@ Measured against the stored composites:
 - **Text** blends with gamma 1.53 (Photoshop's "Blend Text Colors Using Gamma"): coverage mixes
   `B^γ` and `S^γ`, so antialiased edges look heavier than a plain alpha blend.
 - **Effect blend modes** may be stored with long names (`colorBurn`, `softLight`...) in recent files.
+- **Pass-through groups with fill below 100%**: the group's content is what it adds passing
+  through mixed with what it shows apart, by the fill; the fill then fades it. Adjustment layers
+  inside reach only the group's own content.
 - **Channel restrictions** keep the backdrop's values in unchecked channels.
 - **16-bit Lab**: a/b channels run 256 per unit around 32768; L uses the full range.
 - **Photo filter** colors are stored in RGB, HSB, CMYK, Lab (L/100, a and b as signed /100) or gray

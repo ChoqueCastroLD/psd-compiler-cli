@@ -207,7 +207,7 @@ Measured against Photoshop on production comic pages:
 |---|---|---|
 | Text layers (body, bold, stroked) | IoU of glyph coverage vs Photoshop raster | **≈ 0.97** |
 | Warp presets (all 15) | IoU vs reference renders | **0.94 – 0.98** |
-| The 350 [psd-tools](https://github.com/psd-tools/psd-tools) and [ag-psd](https://github.com/Agamnentzar/ag-psd) test files | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **334 / 350 (95.4%)** |
+| The 350 [psd-tools](https://github.com/psd-tools/psd-tools) and [ag-psd](https://github.com/Agamnentzar/ag-psd) test files | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **335 / 350 (95.7%)** |
 
 The reference test renders every file from its layers and compares it with the merged image Photoshop saved, then prints the match rate of every feature (color modes, depths, layer kinds, blend modes, masks, each effect and adjustment). CI runs it on every push; locally:
 

@@ -353,6 +353,25 @@ impl Comp {
         mode: BlendMode,
         w: impl Fn(i32, i32) -> f32 + Sync,
     ) {
+        if let (true, Some(init)) = (self.adjust_isolated, &self.init) {
+            // Over a backdrop, adjust only what this context painted: take the backdrop out,
+            // adjust the rest and put the backdrop back under it.
+            let (x0, y0, cw) = (self.cv.x, self.cv.y, self.cv.w);
+            for (i, (p, b)) in self.cv.px.chunks_exact_mut(4).zip(init.px.chunks_exact(4)).enumerate() {
+                let g = self.ga[i];
+                let k = w(x0 + (i % cw) as i32, y0 + (i / cw) as i32);
+                if g <= 0.0 || k <= 0.0 {
+                    continue;
+                }
+                let c = [0, 1, 2].map(|ch| ((p[ch] - (1.0 - g) * b[ch]) / g).clamp(0.0, 1.0));
+                let t = f(c).map(|v| v.clamp(0.0, 1.0));
+                let t = if mode.is_normal() { t } else { mode.apply(c, t) };
+                for ch in 0..3 {
+                    p[ch] = (c[ch] + (t[ch] - c[ch]) * k) * g + (1.0 - g) * b[ch];
+                }
+            }
+            return;
+        }
         let mut cv = std::mem::take(&mut self.cv);
         cv.adjust(f, mode, self.weight(w));
         self.cv = cv;
@@ -485,8 +504,7 @@ impl Compositor<'_> {
         let (o, f) = (ratio(l.opacity), ratio(l.fill_opacity));
         let reach = effects.reach().ceil() as i32;
         let artboard = artboard(doc, l, cs);
-        // With its fill lowered a pass-through group renders apart, like a normal one.
-        let pass_through = l.blend_mode == BlendMode::PassThrough && artboard.is_none() && f >= 1.0;
+        let pass_through = l.blend_mode == BlendMode::PassThrough && artboard.is_none();
         if pass_through {
             let knocks = children.iter().any(|c| knockout(self.layer(c)) > 0);
             if o >= 1.0 && f >= 1.0 && mask.is_empty() && clips.is_empty() && effects.is_empty() && !knocks {
@@ -494,6 +512,7 @@ impl Compositor<'_> {
                 return;
             }
             let isolate = f < 1.0 || !clips.is_empty() || !effects.is_empty();
+            let saved = (f < 1.0).then(|| self.snapshot(children));
             let mut sub =
                 Comp::new(comp.rect(), Some(comp.cv.clone()), comp.deep.clone(), comp.adjust_isolated || isolate);
             self.composite(children, &mut sub, true);
@@ -518,6 +537,18 @@ impl Compositor<'_> {
                     p[c] = (p[c] - (1.0 - g) * b[c]).clamp(0.0, g);
                 }
                 p[3] = g;
+            }
+            // With its fill lowered, the group's content mixes what it adds passing through with
+            // what it shows apart, by the fill (the fill then fades it as usual).
+            if let Some(saved) = saved {
+                self.outputs.extend(saved);
+                let mut apart = Comp::new(comp.rect(), None, None, false);
+                self.composite(children, &mut apart, true);
+                for (p, q) in content.px.chunks_exact_mut(4).zip(apart.cv.px.chunks_exact(4)) {
+                    for c in 0..4 {
+                        p[c] += (q[c] - p[c]) * f;
+                    }
+                }
             }
             let content = self.trim(content, reach);
             let source = Source::new(content, mask, effects);
@@ -546,6 +577,20 @@ impl Compositor<'_> {
         let mode = if l.blend_mode == BlendMode::PassThrough { BlendMode::Normal } else { self.mode(l.blend_mode) };
         let source = Source::new(sub.cv, mask, effects);
         self.draw_source(l, mode, source, clips, comp);
+    }
+
+    /// Copies of the outputs of the layers under `nodes`, to composite them a second time.
+    fn snapshot(&self, nodes: &[Node]) -> Vec<(usize, LayerOutput)> {
+        let mut out = vec![];
+        for n in nodes {
+            if let Some(o) = self.outputs.get(&n.index()) {
+                out.push((n.index(), o.clone()));
+            }
+            if let Node::Group(_, c) = n {
+                out.extend(self.snapshot(c));
+            }
+        }
+        out
     }
 
     /// Drops the transparent border of a group result, keeping `reach` pixels for its effects.

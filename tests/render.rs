@@ -216,3 +216,21 @@ fn blend_if_hides_by_own_and_underlying_values() {
     assert_eq!(img.pixel(30, 5), ramp(30, 0));
     assert_eq!(img.pixel(10, 5), [0, 0, 0, 255]);
 }
+
+#[test]
+fn pass_through_fill_mixes_blended_and_apart() {
+    // Fit to psd-tools' passthrough_fill_blendmode.psd: in a pass-through group at fill f, a
+    // Lighter Color layer shows by f where it is lighter and by f² where the backdrop is.
+    let group = |child: [u8; 4]| {
+        draw(
+            Psd::new(2, 2)
+                .layer(Layer::solid("gray", 0, 0, 2, 2, [128, 128, 128, 255]))
+                .layer(Layer::group_end())
+                .layer(Layer::solid("child", 0, 0, 2, 2, child).blend(b"lgCl"))
+                .layer(Layer::group("g").blend(b"pass").fill(120)),
+        )
+        .pixel(1, 1)
+    };
+    assert!(close(group([200, 200, 200, 255]), [162, 162, 162, 255], 2), "{:?}", group([200, 200, 200, 255]));
+    assert!(close(group([50, 50, 50, 255]), [111, 111, 111, 255], 2), "{:?}", group([50, 50, 50, 255]));
+}
