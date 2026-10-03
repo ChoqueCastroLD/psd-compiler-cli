@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Color modes: indexed, Lab, duotone and multichannel.
+- Adjustment layers: levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold and black & white.
+- Fill layers, vector masks, knockout.
+- All layer effects: inner shadow, inner glow, satin, bevel and emboss, gradient and pattern overlays, and gradient and pattern strokes.
+- Vertical text, OpenType features from character styles, synthetic super/subscript.
+- Custom and quilt warps.
+- Smart objects re-rendered from embedded PSD/PSB, PNG or JPEG (`--render-smart-objects`).
+- Text replacement: `Document::set_text`, `--set-text` (also inside smart objects) and `--list-text`.
+- JPEG, WebP, TIFF and AVIF output (`-F`, `-Q`, `--background`).
+- Saving the edited document as PSD/PSB: `Document::to_psd`, `-o out.psd`.
+- Closest-style font substitution with synthetic bold/italic, `FontDb::alias` and `--font-map`.
+
+### Changed
+
+- Type layers are clipped to the canvas and drawn in bands, so there is no size limit.
+- Text that can't be parsed falls back to the cached pixels.
+
+### Fixed
+
+- Embedded smart object files were missed in some documents (global block padding).
+
 ## [0.1.0] - 2026-10-03
 
 First public release.

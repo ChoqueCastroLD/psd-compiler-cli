@@ -4,7 +4,7 @@
 psdc [OPTIONS] <INPUT>...
 ```
 
-`psdc` compiles one or more PSD/PSB files to PNG. When there are several inputs they are processed in parallel. Each file renders independently, so a broken file does not stop the batch.
+`psdc` compiles one or more PSD/PSB files to PNG, JPEG, WebP, TIFF or AVIF, or saves them back as PSD/PSB after text edits. When there are several inputs they are processed in parallel. Each file renders independently, so a broken file does not stop the batch.
 
 ## Arguments
 
@@ -16,12 +16,19 @@ psdc [OPTIONS] <INPUT>...
 
 | Option | Default | Description |
 |---|---|---|
-| `-o, --output <PATH>` | `INPUT.png` next to each input | With **one** input this is the output file, unless `PATH` is an existing directory. With **several** inputs it is a directory, created if needed, and each output is named `STEM.png`. |
+| `-o, --output <PATH>` | `INPUT.png` next to each input | With **one** input this is the output file, unless `PATH` is an existing directory. With **several** inputs it is a directory, created if needed, and each output is named `STEM.EXT`. |
+| `-F, --format <FORMAT>` | from `-o`, else `png` | `png`, `jpg`, `webp`, `tif`, `avif`, or `psd` to save the edited document (keeping the input's `.psd`/`.psb` extension). |
+| `-Q, --quality <1-100>` | `90` | JPEG and AVIF quality. WebP is lossless. |
+| `--background <RRGGBB>` | `ffffff` | Color that transparency is flattened onto for JPEG. |
+| `--set-text <LAYER=TEXT>` | none | Replace the text of every type layer named `LAYER`; repeatable. `\n` starts a new paragraph. `Outer/Inner` edits layer `Inner` inside smart object `Outer`. Fails if no layer matches. |
+| `--list-text` | off | Print the type layers of each input (index, name, text) instead of compiling. |
 | `-f, --fonts <DIR>` | none | Font folder searched first. Repeatable; earlier folders win. |
+| `--font-map <FROM=TO>` | none | Draw font `FROM` (the PostScript name in the PSD) with font `TO`; repeatable. Fails if `TO` isn't found. |
 | `--no-system-fonts` | off | Skip the user and system font folders. Useful for reproducible builds. |
 | `--keep-text` | off | Don't re-render type layers. Use the pixels Photoshop cached instead. |
+| `--render-smart-objects` | off | Re-render smart objects from their embedded PSD/PSB, PNG or JPEG through the placement's perspective and warp. Smart objects edited with `--set-text` are always re-rendered. |
 | `--text-masks <DIR>` | none | Also write each type layer's coverage as a grayscale PNG, `DIR/STEM.textNNN.png`. `NNN` is the layer's index, bottom to top. |
-| `-c, --compression <0-9>` | `2` | PNG deflate level. `0` is fastest; `9` gives the smallest files. On a 1284×1826 page, level 2 finishes about 2× faster end to end than level 9, with files about 7% larger. |
+| `-c, --compression <0-9>` | `2` | PNG and TIFF deflate level. `0` is fastest; `9` gives the smallest files. On a 1284×1826 page, level 2 finishes about 2× faster end to end than level 9, with files about 7% larger. |
 | `-j, --jobs <N>` | all cores | Size of the worker thread pool. |
 | `--timings` | off | Print the parse, render and write time of every file. |
 | `-q, --quiet` | off | Print only errors (no progress, no warnings). |
@@ -47,12 +54,13 @@ Fonts are matched by the PostScript name stored in the PSD, such as `Montserrat-
    - macOS: `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts`
    - Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, `%WINDIR%\Fonts`
 
-The first face found for a name wins. If a font is missing, a warning is printed and each character falls back to a face that has the glyph (DejaVu Sans, Noto Sans, Liberation Sans or Arial when available).
+The first face found for a name wins. If a font is missing, the closest weight and slant of the same family is used, or else of a common sans, serif or monospace family chosen from the name. Synthetic bold and italic make up for a lighter or upright substitute, and a warning names the face used. Characters the face lacks fall back to a face that has the glyph (DejaVu Sans, Noto Sans, Liberation Sans or Arial when available). `--font-map` overrides all of this.
 
 ## Output
 
-- PNGs are 8-bit. They are written as **RGB** when every pixel is opaque, and as **RGBA** otherwise.
-- Colors are composited in the document's color space. CMYK and grayscale are converted to RGB.
+- Images are 8-bit. PNG, WebP and TIFF are written as **RGB** when every pixel is opaque, and as **RGBA** otherwise; JPEG is flattened onto `--background`.
+- Colors are composited in the document's color space and converted to sRGB.
+- PSD output copies the input and replaces only what changed: edited type layers and smart objects get new type data and pixels, embedded files are rewritten, and the merged image is re-rendered. Without edits the copy is byte-identical. Supported for 8- and 16-bit RGB and grayscale documents. `psdc` refuses to overwrite the input.
 
 ## Exit status
 
@@ -79,6 +87,12 @@ psdc page.psd --no-system-fonts -f vendor/fonts
 
 # Translation workflow: render plus a mask of every text layer
 psdc page.psd --text-masks masks/
+
+# Translate and keep the PSD editable
+psdc es.psd --set-text 'Title=Hello\nworld' --set-text 'Card/Name=Ana' -o en.psd
+
+# A missing comic font drawn with another one, as a JPEG
+psdc page.psd --font-map CCWildWords-Roman=Anton-Regular -o page.jpg -Q 85
 
 # Compare against Photoshop's cached text
 psdc page.psd --keep-text -o page.cached.png

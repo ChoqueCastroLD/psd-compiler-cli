@@ -6,7 +6,7 @@
 
 **Turn Photoshop files into pixel-perfect PNGs on any machine, with no Photoshop, no browser and no GPU.**
 
-`psdc` parses PSD/PSB files and composites every layer. It also **re-renders text layers from the type data**, so text you edit in the file shows up in the output.
+`psdc` parses PSD/PSB files and composites every layer. It also **re-renders text layers from the type data**, so text you edit (in the file, with `--set-text`, or through the library) shows up in the output, and it can save the edited document back as a PSD.
 
 [![CI](https://github.com/ChoqueCastroLD/psd-compiler-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ChoqueCastroLD/psd-compiler-cli/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -43,10 +43,14 @@ PSD Compiler reads the type engine data (characters, style runs, paragraphs, war
 ## Highlights
 
 - 🎯 **Photoshop-grade text.** Kerning, tracking, leading, paragraph boxes, justification, faux bold and italic, all caps and small caps, baseline shift, underline and strikethrough. Text layers on real comic pages reach **IoU ≈ 0.97** against Photoshop's own rasters.
-- 🌀 **All 15 warp presets.** Arc, Arch, Bulge, Flag, Wave, Fish, Rise, Fisheye, Inflate, Squeeze, Twist, Shell and more, built from the same Bézier patches Photoshop uses.
-- ✨ **Layer effects.** Stroke (inside, center and outside), drop shadow, outer glow and color overlay, using Photoshop's blur and spread model.
-- 🧱 **Full compositing.** All 27 blend modes, groups with pass-through, clipping masks, layer masks, opacity and fill opacity.
-- 📦 **The whole format.** PSD and PSB, 1/8/16/32-bit, RGB, grayscale and CMYK, and raw, RLE, ZIP and ZIP-with-prediction channels.
+- 🈳 **Vertical text and OpenType.** Upright CJK, rotated Latin and the `vert` feature, plus ligatures, contextual alternates, swashes, fractions, ordinals, oldstyle figures and super/subscript from the character styles.
+- 🌀 **Every warp.** All 15 presets (Arc, Arch, Bulge, Flag, Wave, Fish, Rise, Fisheye, Inflate, Squeeze, Twist, Shell…), built from the same Bézier patches Photoshop uses, plus custom and quilt warp meshes.
+- ✨ **All layer effects.** Stroke (solid, gradient or pattern; inside, center or outside), drop and inner shadow, outer and inner glow, satin, bevel and emboss, and color, gradient and pattern overlays, using Photoshop's blur and spread model.
+- 🎛️ **Adjustment layers.** Levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold and black & white.
+- 🧩 **Smart objects.** Cached pixels by default; with `--render-smart-objects` (or after editing text inside one) they are re-rendered from the embedded PSD/PSB, PNG or JPEG through the placement's perspective and warp.
+- 🧱 **Full compositing.** All 27 blend modes, groups with pass-through and knockout, clipping masks, layer and vector masks, fill layers (solid, gradient, pattern), opacity and fill opacity.
+- 📦 **The whole format.** PSD and PSB, 1/8/16/32-bit, RGB, grayscale, bitmap, CMYK, indexed, Lab, duotone and multichannel, and raw, RLE, ZIP and ZIP-with-prediction channels.
+- 💾 **Edit and save.** Replace text from the CLI or the API, then write PNG, JPEG, WebP, TIFF, AVIF, or the edited PSD/PSB itself.
 - ⚡ **Fast.** About 140 ms for a 1284×1826 comic page, from parsing through to the PNG. Batches run in parallel and PNGs are compressed in parallel strips.
 - 🔤 **Bring your own fonts.** Fonts are found by PostScript name in your folders and in the system font directories. No fonts ship with the project.
 - 🦀 **One static binary**, plus a small, safe Rust library.
@@ -94,22 +98,35 @@ PSD files store font **names**, not font files. `psdc` matches the PostScript na
 
 TTF, OTF, TTC and OTC files are supported. Name matching ignores case, spaces and punctuation, so `Montserrat Black` also finds `Montserrat-Black`. The font index is cached in `~/.cache/psd-compiler/fonts.tsv`, so startup takes milliseconds even with thousands of fonts installed.
 
-If a font is missing, `psdc` prints a warning, keeps going, and picks a fallback face for each character. Use `--keep-text` to output Photoshop's cached text pixels instead.
+If a font is missing, `psdc` picks the closest weight and slant of the same family, or else of a common sans, serif or monospace family, adds synthetic bold or italic when the substitute lacks them, and prints a warning naming the face it used. Characters the face lacks fall back to a face that has them. Map fonts yourself with `--font-map CCWildWords-Roman=Anton-Regular`, or use `--keep-text` to output Photoshop's cached text pixels instead.
 
 ## CLI
 
 ```text
 psdc [OPTIONS] <INPUT>...
 
-  -o, --output <PATH>        Output file (one input) or directory (several inputs)
-  -f, --fonts <DIR>          Font folder to search first; repeatable
-      --no-system-fonts      Only use --fonts, PSDC_FONTS and ./fonts
-      --keep-text            Keep Photoshop's cached text pixels
-      --text-masks <DIR>     Write each type layer's coverage as a grayscale PNG
-  -c, --compression <0-9>    PNG compression level [default: 2]
-  -j, --jobs <N>             Worker threads [default: all cores]
-      --timings              Print parse / render / write times
-  -q, --quiet                Only print errors
+  -o, --output <PATH>          Output file (one input) or directory (several inputs)
+  -F, --format <FORMAT>        png, jpg, webp, tif, avif, or psd [default: from -o, else png]
+  -Q, --quality <1-100>        JPEG and AVIF quality [default: 90]
+      --background <RRGGBB>    Color transparency is flattened onto for JPEG [default: ffffff]
+      --set-text <LAYER=TEXT>  Replace a type layer's text; `Smart object/Layer` reaches inside
+      --list-text              List the type layers instead of compiling
+  -f, --fonts <DIR>            Font folder to search first; repeatable
+      --font-map <FROM=TO>     Draw font FROM with font TO; repeatable
+      --no-system-fonts        Only use --fonts, PSDC_FONTS and ./fonts
+      --keep-text              Keep Photoshop's cached text pixels
+      --render-smart-objects   Re-render smart objects from their embedded files
+      --text-masks <DIR>       Write each type layer's coverage as a grayscale PNG
+  -c, --compression <0-9>      PNG and TIFF compression level [default: 2]
+  -j, --jobs <N>               Worker threads [default: all cores]
+      --timings                Print parse / render / write times
+  -q, --quiet                  Only print errors
+```
+
+Translate a page and keep it editable:
+
+```sh
+psdc es.psd --set-text 'Title=Hello\nworld' --set-text 'Card/Name=Ana' -o en.psd
 ```
 
 The full reference is in [docs/CLI.md](docs/CLI.md).
@@ -129,16 +146,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fonts.add_dir("fonts");
     fonts.add_system_fonts();
 
-    let doc = Document::open("page.psd")?;
+    let original = std::fs::read("page.psd")?;
+    let mut doc = Document::parse(&original)?;
     for layer in &doc.layers {
         if let Some(text) = layer.text() {
             println!("{}: {text:?}", layer.name);
         }
     }
+    doc.set_text("Title", "Hello\nworld")?;
 
     let out = render(&doc, &fonts, &RenderOptions::default());
     out.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
     out.image.save_png("page.png", DEFAULT_COMPRESSION)?;
+
+    let (psd, _warnings) = doc.to_psd(&original, &fonts, &RenderOptions::default())?;
+    std::fs::write("page.edited.psd", psd)?;
     Ok(())
 }
 ```
@@ -149,8 +171,11 @@ The API surface:
 |---|---|
 | `Document::open` / `Document::parse` | Parse a PSD/PSB from a path or bytes. |
 | `Document::layers` | A flat, bottom-to-top list of `Layer`s: name, bounds, blend mode, opacity, kind, and `text()`. |
-| `FontDb` | Font discovery: `add_dir`, `add_file`, `add_system_fonts` and an on-disk index cache. |
+| `Document::set_text` | Replace the text of type layers by name, including `Smart object/Layer` paths. |
+| `Document::to_psd` | Write the edited document back as PSD/PSB; untouched data is copied byte for byte. |
+| `FontDb` | Font discovery: `add_dir`, `add_file`, `add_system_fonts`, `alias` and an on-disk index cache. |
 | `render(&doc, &fonts, &options)` | Composites the document into an `Image` (RGBA8), plus `warnings` and optional `text_masks`. |
+| `Image::encode` / `save` | PNG, JPEG, WebP, TIFF or AVIF, chosen by `Format` or the file extension. |
 | `Image::encode_png` / `save_png` | Fast parallel PNG encoder. It writes RGB when the image is opaque. |
 | `psd_compiler::png::encode` | The same encoder for any gray, RGB or RGBA buffer. |
 
@@ -204,15 +229,19 @@ Here is why it is fast:
 
 | Area | Supported | Not yet |
 |---|---|---|
-| Files | PSD, PSB, 1/8/16/32-bit | |
-| Color | RGB, grayscale, bitmap, CMYK | Indexed palette (rendered without palette), Lab, duotone |
-| Layers | Pixel, text, groups, pass-through, clipping, layer masks, opacity, fill | Adjustment layers, smart objects (cached pixels used), vector masks |
+| Files | PSD, PSB, 1/8/16/32-bit; writes edited PSD/PSB (8/16-bit RGB and grayscale) | Writing CMYK, Lab, indexed or 32-bit documents |
+| Color | RGB, grayscale, bitmap, CMYK, indexed, Lab, duotone (as grayscale), multichannel | Duotone ink curves |
+| Layers | Pixel, text, groups, pass-through, knockout, clipping, layer and vector masks, fill layers, opacity, fill | |
+| Adjustments | Levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold, black & white | Color lookup |
+| Smart objects | Cached pixels; re-rendered from embedded PSD/PSB, PNG or JPEG with perspective and warps; text edits inside | Smart filters (cached pixels used), linked files outside the document |
 | Blend modes | All 27, including Dissolve, Hue/Saturation/Color/Luminosity | |
-| Text | Point and paragraph text, runs, kerning, tracking, leading, scale, baseline shift, caps, faux styles, decorations, all justification modes, indents, spacing | Vertical text (drawn horizontally), OpenType features beyond kerning |
-| Warps | All 15 presets, bend, horizontal/vertical distortion | Custom warps |
-| Effects | Stroke, drop shadow, outer glow, color overlay | Inner shadow, inner glow, bevel, satin, gradient and pattern overlay (skipped with a warning) |
+| Text | Point and paragraph text, runs, kerning, tracking, leading, scale, baseline shift, caps, faux styles, decorations, all justification modes, indents, spacing, vertical text, OpenType features, any size | |
+| Warps | All 15 presets, bend, horizontal/vertical distortion, custom and quilt meshes | |
+| Effects | Stroke (solid, gradient, pattern), drop and inner shadow, outer and inner glow, satin, bevel and emboss, color/gradient/pattern overlay | |
+| Fonts | PostScript name lookup, closest-style substitution, synthetic bold/italic, `--font-map` | |
+| Output | PNG, JPEG, WebP, TIFF, AVIF, PSD/PSB | |
 
-Anything unsupported produces a **warning**, never a crash.
+Anything unsupported produces a **warning**, never a crash. Text that can't be parsed falls back to the cached pixels.
 
 ## Text masks
 
@@ -237,20 +266,22 @@ Almost always the font is missing or is a different version. Look for `font X no
 The parser is written in safe Rust. It bounds-checks every read, limits nesting depth and caps allocation sizes. A malformed file returns an error.
 
 **Does it write PSDs?**
-Not yet. It reads PSDs and writes PNGs.
+Yes. With an output ending in `.psd`/`.psb` (or `-F psd`), `psdc` saves the document with your `--set-text` edits: edited type layers and smart objects get new pixels and type data, the merged preview is re-rendered, and everything else is copied unchanged. It never overwrites the input.
 
 ## Roadmap
 
-- [ ] Vertical text
-- [ ] Inner shadow, inner glow, bevel and emboss
-- [ ] Gradient and pattern overlays
-- [ ] Adjustment layers (levels, curves, hue/saturation)
-- [ ] Indexed color palettes
+- [ ] Smart filters
+- [ ] Color lookup adjustments
+- [ ] Writing CMYK and 32-bit PSDs
 - [ ] WebAssembly build
 
 ## Contributing
 
 Contributions are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the dev loop, the test builder that generates PSDs in code, and the rules for adding calibrated behavior.
+
+## Acknowledgements
+
+Format details were cross-checked against [psd-tools](https://github.com/psd-tools/psd-tools) (MIT) and its test files.
 
 ## License
 
