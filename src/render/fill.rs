@@ -257,7 +257,8 @@ impl GradientFill {
         let cy = (b[1] + b[3]) / 2.0 + self.offset.1 * bh;
         let th = self.angle.to_radians();
         let (cos, sin) = (th.cos(), th.sin());
-        let half = ((bw * cos).abs() + (bh * sin).abs()).max(1.0) * self.scale / 2.0;
+        let fit = |side: f64, k: f64| if k.abs() > 1e-9 { side / k.abs() } else { f64::INFINITY };
+        let half = fit(bw, cos).min(fit(bh, sin)).max(1.0) * self.scale / 2.0;
         // Photoshop snaps the end points to whole pixels, which matters for small boxes.
         // (Rounding errors in the angle must not drop a whole pixel.)
         let snap = |v: f64| (v + 1e-6).floor();
@@ -503,6 +504,11 @@ mod tests {
         assert!((f.position(100.5, 5.5, b) - 1.0).abs() < 1e-9);
         let up = GradientFill { angle: 90.0, ..f.clone() };
         assert!((up.position(50.5, 10.5, b)).abs() < 1e-9);
+        // Steep angles span the line through the center as far as the box clips it, not the
+        // box's projection: about 10 px here, not 27.
+        let steep = GradientFill { angle: 80.0, ..f.clone() };
+        let rise = steep.position(50.5, 0.5, b) - steep.position(50.5, 10.5, b);
+        assert!(rise > 0.9, "{rise}");
         let radial = GradientFill { style: Style::Radial, ..f };
         assert!((radial.position(50.5, 5.5, b)).abs() < 1e-9);
         assert!((radial.position(100.5, 5.5, b) - 1.0).abs() < 1e-9);

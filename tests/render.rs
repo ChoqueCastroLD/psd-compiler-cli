@@ -157,6 +157,15 @@ fn png_roundtrip() {
 }
 
 #[test]
+fn restricted_channels_keep_the_backdrop() {
+    // Advanced blending with only R and G checked: the blue channel (index 2) is left alone.
+    let gray = Psd::new(4, 4).layer(Layer::solid("bg", 0, 0, 4, 4, [128, 128, 128, 255]));
+    let img =
+        draw(gray.layer(Layer::solid("red", 0, 0, 4, 4, [255, 0, 0, 255]).block(b"brst", 2u32.to_be_bytes().to_vec())));
+    assert_eq!(img.pixel(1, 1), [255, 0, 128, 255]);
+}
+
+#[test]
 fn blend_if_hides_by_own_and_underlying_values() {
     const FULL: [u8; 4] = [0, 0, 255, 255];
     // Underlay: left half black, right half white. A gray ramp on top.

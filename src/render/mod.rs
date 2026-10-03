@@ -563,6 +563,9 @@ impl Compositor<'_> {
                 }
             }
         }
+        // Advanced blending's unchecked channels keep the backdrop's values.
+        let restricted = restricted_channels(self.ctx.doc, l);
+        let before = (!restricted.is_empty()).then(|| comp.cv.px.clone());
         let (o, mut f) = (ratio(l.opacity), ratio(l.fill_opacity));
         let c = &s.content;
         let rect = (c.x, c.y, c.w, c.h);
@@ -638,6 +641,13 @@ impl Compositor<'_> {
             blend_if(&l.blend_ranges, &mut body, &comp.cv);
         }
         comp.paint(&body, Some(&s.coverage), mode, knockout(l));
+        if let Some(before) = before {
+            for (p, q) in comp.cv.px.chunks_exact_mut(4).zip(before.chunks_exact(4)) {
+                for &ch in &restricted {
+                    p[ch] = if q[3] > 0.0 { q[ch] / q[3] * p[3] } else { 0.0 };
+                }
+            }
+        }
     }
 
     fn skip_refs(&mut self, nodes: &[&Node]) {
@@ -769,6 +779,19 @@ fn artboard(doc: &Document, l: &Layer, cs: &ColorSpace) -> Option<(Rect, Option<
     };
     let _ = doc;
     Some((rect, bg))
+}
+
+/// The color channels layer `l` leaves alone (`brst`), as RGB channel indices.
+fn restricted_channels(doc: &Document, l: &Layer) -> Vec<usize> {
+    use crate::psd::ColorMode;
+    let Some(b) = l.block(b"brst") else { return vec![] };
+    let channels: Vec<usize> =
+        b.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as usize).collect();
+    match doc.color_mode {
+        ColorMode::Rgb => channels.into_iter().filter(|&c| c < 3).collect(),
+        ColorMode::Grayscale if channels.contains(&0) => vec![0, 1, 2],
+        _ => vec![],
+    }
 }
 
 /// The Background layer's pixels, for deep knockout.

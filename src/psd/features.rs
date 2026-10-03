@@ -168,6 +168,9 @@ impl Document {
             if l.blend_if {
                 add("blend if");
             }
+            if l.block(b"brst").is_some_and(|b| !b.is_empty()) {
+                add("channel restrictions");
+            }
             effects(l, &mut out);
         }
         out.into_iter().collect()
