@@ -370,6 +370,29 @@ impl PatternFill {
 
     /// Straight RGBA of the pattern at document pixel center `(x, y)`.
     pub fn sample(&self, p: &Pattern, x: f64, y: f64, origin: (f64, f64)) -> [f32; 4] {
+        // Shrunk patterns average the texels the pixel covers rather than alias.
+        let n = (1.0 / self.scale).ceil().min(16.0) as usize;
+        if n < 2 {
+            return self.sample_at(p, x, y, origin);
+        }
+        let mut acc = [0f32; 4];
+        for j in 0..n {
+            for i in 0..n {
+                let (sx, sy) = (x - 0.5 + (i as f64 + 0.5) / n as f64, y - 0.5 + (j as f64 + 0.5) / n as f64);
+                let c = self.sample_at(p, sx, sy, origin);
+                for k in 0..3 {
+                    acc[k] += c[k] * c[3];
+                }
+                acc[3] += c[3];
+            }
+        }
+        if acc[3] <= 0.0 {
+            return [0.0; 4];
+        }
+        [acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3], acc[3] / (n * n) as f32]
+    }
+
+    fn sample_at(&self, p: &Pattern, x: f64, y: f64, origin: (f64, f64)) -> [f32; 4] {
         let (mut u, mut v) = (x - origin.0 - self.phase.0, y - origin.1 - self.phase.1);
         if self.angle != 0.0 {
             let th = self.angle.to_radians();
@@ -585,5 +608,13 @@ mod tests {
         let f = PatternFill { id: String::new(), scale: 1.0, angle: 0.0, phase: (0.0, 0.0), align: true };
         assert_eq!(f.sample(&p, 0.5, 0.5, (0.0, 0.0)), [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(f.sample(&p, 3.5, 7.5, (0.0, 0.0)), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn shrunk_patterns_average() {
+        let p = Pattern { width: 2, height: 1, rgba: vec![255, 0, 0, 255, 0, 0, 255, 255] };
+        let f = PatternFill { id: String::new(), scale: 0.25, angle: 0.0, phase: (0.0, 0.0), align: true };
+        let c = f.sample(&p, 0.5, 0.5, (0.0, 0.0));
+        assert!((c[0] - 0.5).abs() < 0.05 && (c[2] - 0.5).abs() < 0.05 && c[3] == 1.0, "{c:?}");
     }
 }

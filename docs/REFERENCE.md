@@ -13,7 +13,7 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
-single color (77 of the 415, e.g. an adjustment over an empty canvas) count toward the total but not
+single color (113 of the 491, e.g. an adjustment over an empty canvas) count toward the total but not
 toward the feature rates, since they cannot show whether a feature renders right.
 
 Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
@@ -23,8 +23,9 @@ little about them.
 
 CI runs it on the test files of [psd-tools](https://github.com/psd-tools/psd-tools),
 [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd),
-[psd.rb](https://github.com/layervault/psd.rb) and [chinedufn/psd](https://github.com/chinedufn/psd),
-each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
+[psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd),
+[PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk)
+and [psd.js](https://github.com/meltingice/psd.js), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
 carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files. None of the
 files are committed here.
 
@@ -35,7 +36,8 @@ files are committed here.
 | psd-tools `tests/psd_files` | 269 / 274 (98.2%) |
 | ag-psd `test` | 73 / 76 (96.1%) |
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
-| All | 406 / 415 (97.8%) |
+| PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
+| All | 481 / 491 (98.0%) |
 
 ### Misses
 
@@ -47,6 +49,7 @@ files are committed here.
 | `effects/shape-fx2.psd` | Effect edges off by about a tenth of a pixel along a 45° edge, on a 32×32 canvas (4% of pixels). |
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
+| PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.07, 2.5% of pixels). |
 | ag-psd `multiple-strokes-test.psd` | Strokes around soft brush edges reach about 0.2 px further than Photoshop's (1.4% of pixels). |
 
 ## Calibrated models
@@ -85,6 +88,7 @@ Measured against the stored composites:
   level `b` steps along a fixed field (so +b and −b undo each other and keep black and white);
   contrast is a spline through (55, 55 − 0.27c) and (200, 200 + 0.27c), pivoting on middle gray.
   Grayscale and CMYK documents use the same curve on their stored values.
+- **Patterns** shrunk below their size average the texels each pixel covers rather than sample one.
 - **Text** blends with gamma 1.53 (Photoshop's "Blend Text Colors Using Gamma"): coverage mixes
   `B^γ` and `S^γ`, so antialiased edges look heavier than a plain alpha blend.
 - **Effect blend modes** may be stored with long names (`colorBurn`, `softLight`...) in recent files.

@@ -56,6 +56,9 @@ jobs:
       WEBTOON_PSD_COMMIT: d1a9a32ad38ff17c16f94562fc2dd47018338e78
       PSD_RB_COMMIT: d8c11365a72c8c6ef2be1281ee6982255b1953db
       PSD_RS_COMMIT: 28357a29414f940b6272b71831b3273f57f267bd
+      PHOTOSHOP_API_COMMIT: 51bb741ba623a69d7a02b29e0e6645494bf4a9c6
+      PSD_SDK_COMMIT: bfa117317e8bb15bfc9f76bad5800da603fddd1d
+      PSD_JS_COMMIT: 7e8392d20fd5d66ad70ddda7309661b9a0ca67c8
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -75,7 +78,7 @@ jobs:
           git -C ag-psd checkout -q FETCH_HEAD
           rm -rf ag-psd/test/write
           find ag-psd -name 'expected.ps[db]' -delete
-      - name: Fetch the webtoon/psd, psd.rb and chinedufn/psd test files
+      - name: Fetch the test files of other PSD libraries
         # webtoon/psd's errors directory holds deliberately broken files.
         run: |
           fetch() {
@@ -87,7 +90,10 @@ jobs:
           fetch webtoon-psd webtoon/psd "$WEBTOON_PSD_COMMIT"
           fetch psd-rb layervault/psd.rb "$PSD_RB_COMMIT"
           fetch psd-rs chinedufn/psd "$PSD_RS_COMMIT"
+          fetch photoshop-api EmilDohne/PhotoshopAPI "$PHOTOSHOP_API_COMMIT"
+          fetch psd-sdk MolecularMatters/psd_sdk "$PSD_SDK_COMMIT"
+          fetch psd-js meltingice/psd.js "$PSD_JS_COMMIT"
           rm -rf webtoon-psd/packages/psd/tests/integration/fixtures/errors
       - run: cargo test --release --test reference -- --nocapture
         env:
-          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs
+          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js

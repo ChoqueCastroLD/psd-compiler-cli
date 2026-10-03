@@ -22,9 +22,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - Smart objects linked to files outside the document, found next to it or at their absolute path; `Document::open` and `Document::set_base_dir`.
 - Smart filters on re-rendered smart objects: blurs, sharpening, unsharp mask, high pass, median, maximum, minimum, offset, custom, mosaic, invert, solarize, average, curves and brightness/contrast, with their blending options.
 - Writing CMYK, Lab, duotone, indexed and 32-bit documents.
-- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the test files of psd-tools, ag-psd, webtoon/psd, psd.rb and chinedufn/psd (406/415 match; see docs/REFERENCE.md).
+- Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the test files of psd-tools, ag-psd, webtoon/psd, psd.rb, chinedufn/psd, PhotoshopAPI, psd_sdk and psd.js (481/491 match; see docs/REFERENCE.md).
 - Stroke emboss bevels.
 - Non-legacy brightness/contrast as Photoshop runs it: brightness, then contrast.
+- Patterns shrunk below their size average the texels each pixel covers.
 - Several strokes, shadows and overlays per layer in Photoshop's order (listed top first), upper strokes covering lower ones.
 - Gradient interpolation methods: Linear (linear light), Perceptual (Oklab) and Smooth, in gradient fills, overlays, strokes and gradient maps.
 - Effect contours, glow range and jitter, Blend If, channel restrictions, "Blend Interior Effects as Group", layer style pattern origin (`fxrp`), CMYK plates and 32-bit linear compositing.
