@@ -155,3 +155,31 @@ fn png_roundtrip() {
     assert_eq!((info.width, info.height), (16, 9));
     assert_eq!(&buf[..info.buffer_size()], &img.data[..]);
 }
+
+#[test]
+fn blend_if_hides_by_own_and_underlying_values() {
+    const FULL: [u8; 4] = [0, 0, 255, 255];
+    // Underlay: left half black, right half white. A gray ramp on top.
+    let under = Layer::pixels("under", 0, 0, 40, 10, |x, _| if x < 20 { [0, 0, 0, 255] } else { [255; 4] });
+    let ramp = |x: usize, _: usize| {
+        let v = (x * 255 / 39) as u8;
+        [v, v, v, 255]
+    };
+    // This layer's darks (gray below 128) are hidden.
+    let img = draw(white(40, 10).layer(under.clone()).layer(Layer::pixels("ramp", 0, 0, 40, 10, ramp).blend_if(&[
+        ([128, 128, 255, 255], FULL),
+        (FULL, FULL),
+        (FULL, FULL),
+        (FULL, FULL),
+    ])));
+    assert_eq!(img.pixel(5, 5), [0, 0, 0, 255]);
+    assert_eq!(img.pixel(30, 5), ramp(30, 0));
+    // Shown only over underlying lights; a split slider fades in between.
+    let img = draw(
+        white(40, 10)
+            .layer(under)
+            .layer(Layer::pixels("ramp", 0, 0, 40, 10, ramp).blend_if(&[(FULL, [100, 200, 255, 255])])),
+    );
+    assert_eq!(img.pixel(30, 5), ramp(30, 0));
+    assert_eq!(img.pixel(10, 5), [0, 0, 0, 255]);
+}

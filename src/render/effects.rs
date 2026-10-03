@@ -3,6 +3,7 @@
 //! [`Effects::prepare`] turns a layer's coverage into effect layers (in parallel with other
 //! layers); [`assemble`] then folds the interior ones into the layer's own pixels.
 
+use super::adjust;
 use super::canvas::Raster;
 use super::distance::{blur, distances, downsample, edge_offsets, soft_distance, Distances, SS};
 use super::fill::{Fill, Gradient, GradientFill};
@@ -31,6 +32,7 @@ pub(crate) struct Shadow {
     pub spread: f64,
     pub size: f64,
     pub knocked_out: bool,
+    pub contour: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +44,8 @@ pub(crate) struct Glow {
     pub spread: f64,
     pub size: f64,
     pub center: bool,
+    pub contour: Option<Vec<f32>>,
+    pub range: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,6 +201,53 @@ fn enabled<'a>(fx: &'a Descriptor, single: &str, multi: &str) -> Vec<&'a Descrip
     all.into_iter().filter(|d| d.bool("enab").unwrap_or(false)).collect()
 }
 
+/// A shape contour (`TrnS`) as a table over `[0, 1]`, or `None` when it is linear. Corner points
+/// (`Cnty` false) split the curve into separately smoothed pieces.
+fn contour(d: &Descriptor) -> Option<Vec<f32>> {
+    let mut pts: Vec<(f64, f64, bool)> = d
+        .desc("TrnS")?
+        .list("Crv ")?
+        .iter()
+        .filter_map(|v| match v {
+            Value::Descriptor(c) => {
+                Some((c.num("Hrzn")? / 255.0, c.num("Vrtc")? / 255.0, c.bool("Cnty").unwrap_or(true)))
+            }
+            _ => None,
+        })
+        .collect();
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    pts.dedup_by(|a, b| a.0 == b.0);
+    let linear = pts.iter().all(|p| (p.0 - p.1).abs() < 1e-6);
+    if pts.len() < 2 || (linear && pts[0].0 == 0.0 && pts[pts.len() - 1].0 == 1.0) {
+        return None;
+    }
+    let mut lut = adjust::table(|_| 0.0);
+    let n = lut.len() - 1;
+    let mut start = 0;
+    for end in 1..pts.len() {
+        if end + 1 < pts.len() && pts[end].2 {
+            continue;
+        }
+        let piece: Vec<(f64, f64)> = pts[start..=end].iter().map(|p| (p.0, p.1)).collect();
+        let f = adjust::spline(&piece);
+        let lo = if start == 0 { 0 } else { (piece[0].0 * n as f64).ceil() as usize };
+        let hi = if end + 1 == pts.len() { n } else { (piece[piece.len() - 1].0 * n as f64).floor() as usize };
+        for (i, v) in lut.iter_mut().enumerate().take(hi + 1).skip(lo) {
+            *v = f(i as f64 / n as f64).clamp(0.0, 1.0) as f32;
+        }
+        start = end;
+    }
+    Some(lut)
+}
+
+/// `v` through contour `lut`.
+fn shaped(lut: &Option<Vec<f32>>, v: f32) -> f32 {
+    let Some(lut) = lut else { return v };
+    let x = v.clamp(0.0, 1.0) * (lut.len() - 1) as f32;
+    let i = (x as usize).min(lut.len() - 2);
+    lut[i] + (lut[i + 1] - lut[i]) * (x - i as f32)
+}
+
 fn light_angle(d: &Descriptor, global: f64) -> f64 {
     if d.bool("uglg").unwrap_or(true) {
         global
@@ -225,6 +276,7 @@ pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects
             spread: (d.num("Ckmt").unwrap_or(0.0) / 100.0 * size).min(size),
             size,
             knocked_out: d.bool("layerConceals").unwrap_or(true),
+            contour: contour(d),
         }
     };
     let glow = |d: &Descriptor, default_mode: &str| {
@@ -237,6 +289,8 @@ pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects
             spread: (d.num("Ckmt").unwrap_or(0.0) / 100.0 * size).min(size),
             size,
             center: d.enumerated("glwS") == Some("SrcC"),
+            contour: contour(d),
+            range: (d.num("Inpr").unwrap_or(50.0) / 100.0).clamp(0.01, 1.0) as f32,
         }
     };
     e.drop_shadows = enabled(fx, "DrSh", "dropShadowMulti").into_iter().map(shadow).collect();
@@ -460,7 +514,8 @@ impl Effects {
         };
 
         for s in &self.drop_shadows {
-            let m = soft(grown(s.spread), s.size, s.spread, 0.0);
+            let mut m = soft(grown(s.spread), s.size, s.spread, 0.0);
+            m.iter_mut().for_each(|v| *v = shaped(&s.contour, *v));
             let (dx, dy) = offset(s.angle, s.distance);
             let mut cov = shift(&m, w, h, dx, dy, 0.0);
             if s.knocked_out {
@@ -470,6 +525,7 @@ impl Effects {
         }
         for g in &self.outer_glows {
             let mut cov = soft(grown(g.spread), g.size, g.spread, 0.0);
+            shape_glow(g, &mut cov);
             let tint = glow_tint(g, &mut cov);
             p.below.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity });
         }
@@ -500,11 +556,13 @@ impl Effects {
         for g in &self.inner_glows {
             let edge = soft(shrunk_inverse(g.spread), g.size, g.spread, 1.0);
             let mut cov: Vec<f32> = if g.center { edge.iter().map(|v| 1.0 - v).collect() } else { edge };
+            shape_glow(g, &mut cov);
             let tint = glow_tint(g, &mut cov);
             p.inner.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity });
         }
         for s in &self.inner_shadows {
-            let m = soft(shrunk_inverse(s.spread), s.size, s.spread, 1.0);
+            let mut m = soft(shrunk_inverse(s.spread), s.size, s.spread, 1.0);
+            m.iter_mut().for_each(|v| *v = 1.0 - shaped(&s.contour, 1.0 - *v));
             let (dx, dy) = offset(s.angle, s.distance);
             let cov = shift(&m, w, h, dx, dy, 1.0);
             p.inner.push(Layered { cov, tint: Tint::Solid(s.color), mode: s.mode, opacity: s.opacity });
@@ -572,30 +630,44 @@ impl Effects {
     }
 }
 
+/// A glow's intensity through its range and contour.
+fn shape_glow(g: &Glow, cov: &mut [f32]) {
+    for v in cov.iter_mut() {
+        *v = shaped(&g.contour, (*v / g.range).min(1.0));
+    }
+}
+
 /// Highlight and shadow coverage of a bevel, from a height field lit at the bevel's angle and altitude.
 fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
     let size = b.size.max(0.5) as f32;
     let ramp = |t: f32| t.clamp(0.0, 1.0);
-    let mut height = match b.style {
-        BevelStyle::Inner => field(d, w, h, |inside, _, din| if inside { ramp(din / size) } else { 0.0 }),
-        BevelStyle::Outer => field(d, w, h, |inside, dout, _| if inside { 1.0 } else { ramp(1.0 - dout / size) }),
-        BevelStyle::Emboss => field(d, w, h, |inside, dout, din| {
-            let s = if inside { din } else { -dout };
-            ramp(0.5 + s / size)
-        }),
-        BevelStyle::Pillow => {
-            field(d, w, h, |inside, dout, din| if inside { ramp(din / size) } else { ramp(dout / size) })
+    let mut height = if b.smooth {
+        // Smooth bevels are lit from the blurred shape, a pillow from its distance to the edge level.
+        let mut g = a.to_vec();
+        blur(&mut g, w, h, size as f64 * SIGMA_PER_SIZE, size as f64);
+        if b.style == BevelStyle::Pillow {
+            g.iter_mut().for_each(|v| *v = 0.5 + (*v - 0.5).abs());
+        }
+        g
+    } else {
+        match b.style {
+            BevelStyle::Inner => field(d, w, h, |inside, _, din| if inside { ramp(din / size) } else { 0.0 }),
+            BevelStyle::Outer => field(d, w, h, |inside, dout, _| if inside { 1.0 } else { ramp(1.0 - dout / size) }),
+            BevelStyle::Emboss => field(d, w, h, |inside, dout, din| {
+                let s = if inside { din } else { -dout };
+                ramp(0.5 + s / size)
+            }),
+            BevelStyle::Pillow => {
+                field(d, w, h, |inside, dout, din| if inside { ramp(din / size) } else { ramp(dout / size) })
+            }
         }
     };
-    if b.smooth {
-        let s = size as f64 * 0.5;
-        blur(&mut height, w, h, s * SIGMA_PER_SIZE * 2.0, s * 2.0);
-        if b.style == BevelStyle::Inner {
-            height.iter_mut().zip(a).for_each(|(v, &r)| *v *= r);
-        }
-    }
     if b.soften > 0.0 {
+        // Blurs treat the raster's surroundings as 0, so blur relative to the height far outside.
+        let far = if b.style == BevelStyle::Pillow { 1.0 } else { 0.0 };
+        height.iter_mut().for_each(|v| *v -= far);
         blur(&mut height, w, h, b.soften * SIGMA_PER_SIZE, b.soften);
+        height.iter_mut().for_each(|v| *v += far);
     }
     let lift = (b.depth * size as f64).max(0.01) as f32 * if b.up { 1.0 } else { -1.0 };
     let (th, alt) = (b.angle.to_radians(), b.altitude.to_radians());
@@ -790,6 +862,7 @@ mod tests {
             spread: 0.0,
             size: 0.0,
             knocked_out: false,
+            contour: None,
         };
         let e = Effects { inner_shadows: vec![s], ..Default::default() };
         let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);

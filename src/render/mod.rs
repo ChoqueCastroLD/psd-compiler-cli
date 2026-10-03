@@ -28,7 +28,7 @@ use crate::color::{self, ColorSpace};
 use crate::fonts::FontDb;
 use crate::image::Image;
 use crate::psd::descriptor;
-use crate::psd::{Document, Layer, LayerKind};
+use crate::psd::{BlendRange, Document, Layer, LayerKind};
 use canvas::Raster;
 use effects::{Effects, Prepared};
 use layer::{coverage, layer_effects, render_layer, LayerOutput};
@@ -581,12 +581,70 @@ impl Compositor<'_> {
         if mode == BlendMode::Dissolve {
             dissolve(&mut body);
         }
+        if l.blend_if {
+            blend_if(&l.blend_ranges, &mut body, &comp.cv);
+        }
         comp.paint(&body, Some(&s.coverage), mode, knockout(l));
     }
 
     fn skip_refs(&mut self, nodes: &[&Node]) {
         for n in nodes {
             self.skip(std::slice::from_ref(*n));
+        }
+    }
+}
+
+/// Blend If: hides the parts of `body` whose own or underlying (`under`) gray or channel values
+/// fall outside the ranges, fading linearly across split sliders.
+fn blend_if(ranges: &[BlendRange], body: &mut Raster, under: &Raster) {
+    let keep = |r: [u8; 4], v: f32| -> f32 {
+        let v = v * 255.0;
+        let (b0, b1, w0, w1) = (r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32);
+        let black = if v < b0 {
+            0.0
+        } else if v < b1 {
+            (v - b0) / (b1 - b0)
+        } else {
+            1.0
+        };
+        let white = if v > w1 {
+            0.0
+        } else if v > w0 {
+            (w1 - v) / (w1 - w0)
+        } else {
+            1.0
+        };
+        black * white
+    };
+    let straight = |p: &[f32]| {
+        let a = p[3].max(1e-6);
+        [p[0] / a, p[1] / a, p[2] / a]
+    };
+    let weight = |range: [u8; 4], c: [f32; 3], i: usize| match i {
+        0 => keep(range, 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]),
+        _ => keep(range, c[(i - 1).min(2)]),
+    };
+    for (i, p) in body.px.chunks_exact_mut(4).enumerate() {
+        if p[3] <= 0.0 {
+            continue;
+        }
+        let (x, y) = (body.x + (i % body.w) as i32, body.y + (i / body.w) as i32);
+        let (ux, uy) = (x - under.x, y - under.y);
+        let below = if ux >= 0 && uy >= 0 && (ux as usize) < under.w && (uy as usize) < under.h {
+            let o = (uy as usize * under.w + ux as usize) * 4;
+            straight(&under.px[o..o + 4])
+        } else {
+            [0.0; 3]
+        };
+        let this = straight(p);
+        let k: f32 = ranges
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(j, r)| weight(r.this, this, j) * weight(r.under, below, j))
+            .product();
+        if k < 1.0 {
+            p.iter_mut().for_each(|c| *c *= k);
         }
     }
 }

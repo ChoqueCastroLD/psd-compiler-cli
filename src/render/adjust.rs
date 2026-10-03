@@ -644,7 +644,6 @@ fn black_white(data: &[u8], cs: &ColorSpace) -> Option<ColorFn> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn spline_passes_through_points() {
         let pts = [(0.0, 0.0), (0.25, 0.5), (1.0, 1.0)];

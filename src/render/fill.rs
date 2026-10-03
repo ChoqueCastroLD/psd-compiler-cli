@@ -270,7 +270,8 @@ impl PatternFill {
             let (c, s) = (th.cos(), th.sin());
             (u, v) = (u * c - v * s, u * s + v * c);
         }
-        let (u, v) = (u / self.scale - 0.5, v / self.scale - 0.5);
+        // Scaled patterns map pixel corners, not centers, onto texel centers.
+        let (u, v) = ((u - 0.5) / self.scale, (v - 0.5) / self.scale);
         let (w, h) = (p.width as f64, p.height as f64);
         let fetch = |i: i64, j: i64| {
             let i = i.rem_euclid(p.width as i64) as usize;

@@ -148,6 +148,7 @@ pub struct Layer {
     compression: Compression,
     blocks: Vec<([u8; 4], Vec<u8>)>,
     mask: Option<([i32; 4], u8, Vec<u8>)>,
+    ranges: Vec<[u8; 8]>,
 }
 
 impl Layer {
@@ -163,6 +164,7 @@ impl Layer {
             compression: Compression::Raw,
             blocks: vec![],
             mask: None,
+            ranges: vec![],
         }
     }
 
@@ -267,6 +269,11 @@ impl Layer {
 
     pub fn opacity(mut self, v: u8) -> Self {
         self.opacity = v;
+        self
+    }
+    /// Blend If ranges (gray, then channels): this layer's and the underlying `[b0, b1, w0, w1]`.
+    pub fn blend_if(mut self, ranges: &[([u8; 4], [u8; 4])]) -> Self {
+        self.ranges = ranges.iter().map(|(t, u)| [t[0], t[1], t[2], t[3], u[0], u[1], u[2], u[3]]).collect();
         self
     }
     pub fn blend(mut self, key: &[u8; 4]) -> Self {
@@ -818,7 +825,8 @@ impl Psd {
                     }
                     None => extra.u32(0),
                 }
-                extra.u32(0);
+                extra.u32(l.ranges.len() as u32 * 8);
+                l.ranges.iter().for_each(|r| extra.raw(r));
                 let name: Vec<u8> =
                     l.name.chars().map(|c| if c.is_ascii() { c as u8 } else { b'?' }).take(255).collect();
                 extra.u8(name.len() as u8);

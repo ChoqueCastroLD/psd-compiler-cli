@@ -11,6 +11,7 @@ use super::vector;
 use super::{Ctx, TextMask};
 use crate::color::{self, ColorSpace};
 use crate::psd::descriptor;
+use crate::psd::reader::Reader;
 use crate::psd::{ColorMode, Document, Layer, LayerKind, FILL_KEYS};
 use crate::text::path::{self, Seg};
 use crate::text::{layout, AntiAlias, TextLayer};
@@ -329,6 +330,22 @@ pub(crate) fn layer_effects(doc: &Document, cs: &ColorSpace, l: &Layer) -> Effec
         .or(l.block(b"lfxs"))
         .and_then(|b| descriptor::parse_block(b, 8).ok())
         .map(|d| effects::parse(&d, doc, cs))
+        .map(|mut e| {
+            // Patterns linked with the layer start at its effects reference point.
+            let mut r = Reader::new(l.block(b"fxrp").unwrap_or_default());
+            if let (Ok(x), Ok(y)) = (r.f64(), r.f64()) {
+                let fills =
+                    e.pattern_overlays.iter_mut().map(|o| &mut o.fill).chain(e.strokes.iter_mut().map(|s| &mut s.fill));
+                for f in fills {
+                    if let Fill::Pattern(p) = f {
+                        if p.align {
+                            p.phase = (p.phase.0 + x, p.phase.1 + y);
+                        }
+                    }
+                }
+            }
+            e
+        })
         .unwrap_or_default()
 }
 
