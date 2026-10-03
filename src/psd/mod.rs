@@ -10,7 +10,7 @@ pub(crate) mod write;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use channel::{decode_channel, decode_packbits, to_8bit, Compression};
+use channel::{decode_channel, decode_packbits, to_8bit, Compression, Sample};
 use descriptor::Descriptor;
 use reader::Reader;
 
@@ -438,7 +438,7 @@ fn read_record(r: &mut Reader) -> Result<Record> {
 
 /// The layers, and whether the merged image's first alpha channel is its transparency (a
 /// negative layer count).
-fn read_layer_info(r: &mut Reader, end: usize, depth: u16) -> Result<(Vec<Layer>, bool)> {
+fn read_layer_info(r: &mut Reader, end: usize, depth: u16, lab: bool) -> Result<(Vec<Layer>, bool)> {
     if r.pos + 2 > end {
         return Ok((vec![], false));
     }
@@ -464,7 +464,15 @@ fn read_layer_info(r: &mut Reader, end: usize, depth: u16) -> Result<(Vec<Layer>
                     _ => l.bounds,
                 };
                 if rect.width() > 0 && rect.height() > 0 {
-                    let px = decode_channel(r, compression, rect.width(), rect.height(), depth, channel_end, id < 0)?;
+                    let px = decode_channel(
+                        r,
+                        compression,
+                        rect.width(),
+                        rect.height(),
+                        depth,
+                        channel_end,
+                        if id < 0 { Sample::Linear } else { Sample::of(id as usize, 3, lab) },
+                    )?;
                     l.channels.insert(id, px);
                 }
             }
@@ -512,6 +520,7 @@ fn read_composite(
     channels: usize,
     depth: u16,
     color_channels: usize,
+    lab: bool,
 ) -> Result<Vec<Vec<u8>>> {
     if r.remaining() <= 2 {
         return Ok(vec![]);
@@ -532,14 +541,14 @@ fn read_composite(
                     let src = r.bytes(n.min(end - r.pos))?;
                     decode_packbits(src, &mut raw, stride);
                 }
-                out.push(to_8bit(raw, width, height, depth, c >= color_channels)?);
+                out.push(to_8bit(raw, width, height, depth, Sample::of(c, color_channels, lab))?);
             }
         }
         Compression::Raw => {
             for c in 0..channels {
                 let mut raw = r.bytes((stride * height).min(end - r.pos))?.to_vec();
                 raw.resize(stride * height, 0);
-                out.push(to_8bit(raw, width, height, depth, c >= color_channels)?);
+                out.push(to_8bit(raw, width, height, depth, Sample::of(c, color_channels, lab))?);
             }
         }
         _ => {}
@@ -615,11 +624,11 @@ fn read_pattern(r: &mut Reader) -> Result<(String, Pattern)> {
                 let stride = pw * depth as usize / 8;
                 let mut raw = r.bytes((stride * ph).min(end.saturating_sub(r.pos)))?.to_vec();
                 raw.resize(stride * ph, 0);
-                to_8bit(raw, pw, ph, depth, false)?
+                to_8bit(raw, pw, ph, depth, Sample::Color)?
             }
-            1 => decode_channel(r, Compression::Rle, pw, ph, depth, end, false)?,
-            2 => decode_channel(r, Compression::Zip, pw, ph, depth, end, false)?,
-            _ => decode_channel(r, Compression::ZipPredicted, pw, ph, depth, end, false)?,
+            1 => decode_channel(r, Compression::Rle, pw, ph, depth, end, Sample::Color)?,
+            2 => decode_channel(r, Compression::Zip, pw, ph, depth, end, Sample::Color)?,
+            _ => decode_channel(r, Compression::ZipPredicted, pw, ph, depth, end, Sample::Color)?,
         };
         planes.push((pw == w && ph == h).then_some(plane));
         r.pos = end;
@@ -988,7 +997,7 @@ impl Document {
             let info_len = r.length()?;
             let info_end = r.pos + info_len;
             if info_len > 0 {
-                (layers, merged_alpha) = read_layer_info(&mut r, info_end, depth)?;
+                (layers, merged_alpha) = read_layer_info(&mut r, info_end, depth, color_mode == ColorMode::Lab)?;
             }
             r.pos = info_end;
             if r.pos + 4 <= layer_mask_end {
@@ -998,7 +1007,8 @@ impl Document {
             let globals = Blocks::read(&mut r, layer_mask_end, true, &GLOBAL_KEYS)?;
             if layers.is_empty() {
                 if let Some(b) = [b"Layr", b"Lr16", b"Lr32"].iter().find_map(|k| globals.get(k)) {
-                    (layers, merged_alpha) = read_layer_info(&mut Reader::at(b, 0, r.psb), b.len(), depth)?;
+                    (layers, merged_alpha) =
+                        read_layer_info(&mut Reader::at(b, 0, r.psb), b.len(), depth, color_mode == ColorMode::Lab)?;
                 }
             }
             merged_alpha |= globals.present.iter().any(|k| matches!(k, b"Mtrn" | b"Mt16" | b"Mt32"));
@@ -1017,6 +1027,7 @@ impl Document {
             channel_count as usize,
             depth,
             color_mode.channels(),
+            color_mode == ColorMode::Lab,
         )?;
         Ok(Document {
             width,

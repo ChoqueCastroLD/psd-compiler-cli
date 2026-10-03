@@ -91,12 +91,38 @@ fn row_bytes(width: usize, depth: u16) -> usize {
     }
 }
 
+/// What a channel holds, which decides how deeper samples map to 8 bits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Sample {
+    Color,
+    /// Alpha and masks: never gamma encoded.
+    Linear,
+    /// Lab a/b: 16-bit samples are 256 per unit around 32768, not a 0..=65535 ramp.
+    Chroma,
+}
+
+impl Sample {
+    pub(crate) fn of(c: usize, color_channels: usize, lab: bool) -> Sample {
+        if c >= color_channels {
+            Sample::Linear
+        } else if lab && c > 0 {
+            Sample::Chroma
+        } else {
+            Sample::Color
+        }
+    }
+}
+
 /// Converts raw samples of any supported depth to 8 bits per sample.
 ///
-/// 32-bit color is linear light and gets the sRGB curve; `linear` channels (alpha, masks) do not.
-pub(crate) fn to_8bit(raw: Vec<u8>, width: usize, height: usize, depth: u16, linear: bool) -> Result<Vec<u8>> {
+/// 32-bit color is linear light and gets the sRGB curve; linear channels (alpha, masks) do not.
+pub(crate) fn to_8bit(raw: Vec<u8>, width: usize, height: usize, depth: u16, kind: Sample) -> Result<Vec<u8>> {
+    let linear = kind == Sample::Linear;
     Ok(match depth {
         8 => raw,
+        16 if kind == Sample::Chroma => {
+            raw.chunks_exact(2).map(|c| ((u16::from_be_bytes([c[0], c[1]]) as u32 + 128) >> 8).min(255) as u8).collect()
+        }
         16 => raw
             .chunks_exact(2)
             .map(|c| ((u16::from_be_bytes([c[0], c[1]]) as u32 * 255 + 32767) / 65535) as u8)
@@ -132,7 +158,7 @@ pub(crate) fn decode_channel(
     height: usize,
     depth: u16,
     end: usize,
-    linear: bool,
+    kind: Sample,
 ) -> Result<Vec<u8>> {
     let stride = row_bytes(width, depth);
     let size = stride * height;
@@ -160,7 +186,7 @@ pub(crate) fn decode_channel(
         }
     }
     raw.resize(size, 0);
-    to_8bit(raw, width, height, depth, linear)
+    to_8bit(raw, width, height, depth, kind)
 }
 
 #[cfg(test)]
@@ -227,11 +253,14 @@ mod tests {
 
     #[test]
     fn converts_depths_to_8bit() {
-        assert_eq!(to_8bit(vec![0xAB, 0xCD], 1, 1, 16, false).unwrap(), [0xAB]);
-        assert_eq!(to_8bit(1.0f32.to_be_bytes().to_vec(), 1, 1, 32, false).unwrap(), [255]);
-        assert_eq!(to_8bit(0.25f32.to_be_bytes().to_vec(), 1, 1, 32, true).unwrap(), [64]);
-        assert_eq!(to_8bit(vec![0b1010_0000], 3, 1, 1, false).unwrap(), [0, 255, 0]);
-        assert!(to_8bit(vec![], 0, 0, 7, false).is_err());
+        assert_eq!(to_8bit(vec![0xAB, 0xCD], 1, 1, 16, Sample::Color).unwrap(), [0xAB]);
+        assert_eq!(to_8bit(1.0f32.to_be_bytes().to_vec(), 1, 1, 32, Sample::Color).unwrap(), [255]);
+        assert_eq!(to_8bit(0.25f32.to_be_bytes().to_vec(), 1, 1, 32, Sample::Linear).unwrap(), [64]);
+        assert_eq!(to_8bit(vec![0b1010_0000], 3, 1, 1, Sample::Color).unwrap(), [0, 255, 0]);
+        assert!(to_8bit(vec![], 0, 0, 7, Sample::Color).is_err());
+        // Lab a/b: 32768 is neutral, 256 per unit (a = 80.8 here).
+        assert_eq!(to_8bit(53453u16.to_be_bytes().to_vec(), 1, 1, 16, Sample::Chroma).unwrap(), [209]);
+        assert_eq!(to_8bit(32768u16.to_be_bytes().to_vec(), 1, 1, 16, Sample::Chroma).unwrap(), [128]);
     }
 
     #[test]
@@ -242,7 +271,7 @@ mod tests {
         enc.write_all(&[5, 1, 1, 7, 0, 0]).unwrap();
         let data = enc.finish().unwrap();
         let mut r = Reader::new(&data);
-        let out = decode_channel(&mut r, Compression::ZipPredicted, 3, 2, 8, data.len(), false).unwrap();
+        let out = decode_channel(&mut r, Compression::ZipPredicted, 3, 2, 8, data.len(), Sample::Color).unwrap();
         assert_eq!(out, [5, 6, 7, 7, 7, 7]);
     }
 

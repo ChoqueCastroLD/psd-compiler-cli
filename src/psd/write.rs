@@ -177,11 +177,13 @@ fn color_planes(doc: &Document, cs: &ColorSpace, rgba: &[u8]) -> Vec<Vec<f32>> {
             }
         }
         ColorMode::Lab => {
+            // 16-bit a/b are 256 per unit around 32768.
+            let unit = if doc.depth == 16 { 65535.0 / 256.0 } else { 255.0 };
             for p in rgba.chunks_exact(4) {
                 let [l, a, b] = color::rgb_to_lab([0, 1, 2].map(|c| p[c] as f64 / 255.0));
                 planes[0].push((l / 100.0) as f32);
-                planes[1].push(((a + 128.0) / 255.0) as f32);
-                planes[2].push(((b + 128.0) / 255.0) as f32);
+                planes[1].push(((a + 128.0) / unit) as f32);
+                planes[2].push(((b + 128.0) / unit) as f32);
             }
         }
         ColorMode::Indexed => {
