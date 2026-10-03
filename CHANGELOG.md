@@ -26,6 +26,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Stroke emboss bevels.
 - Non-legacy brightness/contrast as Photoshop runs it: brightness, then contrast.
 - Color lookup tables read in the order the layer names; color balance midtones as a per-channel gamma.
+- Vibrance as Photoshop runs it: chroma scaled about the luminance in linear light, less for saturated colors.
 - Patterns shrunk below their size average the texels each pixel covers.
 - Strokes measured with Photoshop's chamfer distance, faceted like its large strokes.
 - Several strokes, shadows and overlays per layer in Photoshop's order (listed top first), upper strokes covering lower ones.

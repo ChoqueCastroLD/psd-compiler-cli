@@ -421,13 +421,23 @@ fn vibrance(data: &[u8]) -> Option<ColorFn> {
     let d = descriptor::parse_block(data, 4).ok()?;
     let vib = d.num("vibrance").unwrap_or(0.0) as f32 / 100.0;
     let sat = d.num("Strt").unwrap_or(0.0) as f32 / 100.0;
-    Some(Box::new(move |c| {
-        let hsl = rgb_to_hsl(c);
-        let s = hsl[1];
-        let boost = if vib > 0.0 { vib * (1.0 - s) * (1.0 - s) } else { vib };
-        let s = saturate(saturate(s, boost.clamp(-1.0, 1.0)), sat);
-        hsl_to_rgb(hsl[0], s, hsl[2])
-    }))
+    Some(vibrance_fn(vib, sat))
+}
+
+fn vibrance_fn(vib: f32, sat: f32) -> ColorFn {
+    Box::new(move |c| {
+        // Both sliders scale chroma about the luminance in gamma 2.4 light, vibrance by
+        // less as the HSB saturation grows (fit to Photoshop's VibranceResource and AllAdjustments).
+        let (hi, lo) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+        if hi <= lo {
+            return c;
+        }
+        let s = (hi - lo) / hi;
+        let k = (1.0 + sat) * (1.0 + vib * (1.0 - s) / 3.0);
+        let lin = c.map(|v| v.clamp(0.0, 1.0).powf(2.4));
+        let y = 0.32 * lin[0] + 0.62 * lin[1] + 0.06 * lin[2];
+        lin.map(|v| (y + k * (v - y)).clamp(0.0, 1.0).powf(1.0 / 2.4))
+    })
 }
 
 fn exposure(r: &mut Reader, trc: f64) -> Option<ColorFn> {
@@ -694,6 +704,24 @@ mod tests {
         data.push(0);
         let o = color_balance(&mut Reader::new(&data)).unwrap()([0.5; 3]);
         assert!((o[0] - 0.25).abs() < 1e-4 && o[1] == 0.5 && o[2] == 0.5, "{o:?}");
+    }
+
+    #[test]
+    fn vibrance_spares_saturated_colors() {
+        let gray = vibrance_fn(1.0, 0.5)([0.4; 3]);
+        assert_eq!(gray, [0.4; 3]);
+        let chroma = |f: &ColorFn, c: [f32; 3]| {
+            let o = f(c);
+            o[0] - o[2]
+        };
+        let vib = vibrance_fn(0.6, 0.0);
+        // A dull orange gains more than a vivid one, relative to its chroma.
+        let dull = chroma(&vib, [0.6, 0.5, 0.45]) / 0.15;
+        let vivid = chroma(&vib, [0.9, 0.45, 0.05]) / 0.85;
+        assert!(dull > vivid && vivid > 1.0, "{dull} {vivid}");
+        // Saturation alone scales chroma about the luminance.
+        let desat = vibrance_fn(0.0, -1.0)([0.9, 0.45, 0.05]);
+        assert!((desat[0] - desat[2]).abs() < 1e-6, "{desat:?}");
     }
 
     fn grdm(version: u16, method: &[u8; 4]) -> Vec<u8> {

@@ -93,6 +93,9 @@ Measured against the stored composites:
   Grayscale and CMYK documents use the same curve on their stored values.
 - **Color Balance** midtones bend each channel by a gamma of `2^(−m/100)`, each output depending
   only on its own channel.
+- **Vibrance**: both sliders scale chroma about the luminance (0.32, 0.62, 0.06) in gamma 2.4
+  light, Saturation by `1 + s`, Vibrance by `1 + v · (1 − S) / 3` where S is the HSB saturation.
+  Fit to the two Aspose.PSD files that hold a Vibrance layer alone; skin tones get no special case.
 - **Color Lookup** CUBE tables name their loops outer to inner: `bgrOrder` runs red fastest,
   `rgbOrder` blue fastest.
 - **Patterns** shrunk below their size average the texels each pixel covers rather than sample one.
