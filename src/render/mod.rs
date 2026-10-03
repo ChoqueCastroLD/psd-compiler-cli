@@ -645,13 +645,47 @@ impl Compositor<'_> {
             self.skip_refs(clips);
             return;
         }
+        // Without "Blend Clipped Layers as Group" the clipped layers blend with their own modes
+        // onto what is below the layer, within its pixels and at its opacity, and hide the layer
+        // where they cover it (oov/psd's clipping.psd).
+        if !clips.is_empty() && l.block(b"clbl").is_some_and(|b| b.first() == Some(&0)) {
+            let c = &s.content;
+            let r = raster_rect(c);
+            let o = ratio(l.opacity);
+            let within: Vec<f32> = c.px.chunks_exact(4).map(|p| p[3] * o).collect();
+            let below = Comp::new(r, Some(comp.cv.clone()), None, false).cv;
+            self.draw_source(l, mode, s, &[], comp);
+            let mut sub = Comp::new(r, Some(below.clone()), None, false);
+            self.composite_refs(clips, &mut sub);
+            let Some((x0, y0, x1, y1)) = intersect(comp.rect(), r) else { return };
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (i, j) = (comp.at(x, y), sub.at(x, y));
+                    let (m, covered) = (within[j], sub.ga[j]);
+                    for ch in 0..4 {
+                        let (b, q) = (below.px[j * 4 + ch], sub.cv.px[j * 4 + ch]);
+                        let p = &mut comp.cv.px[i * 4 + ch];
+                        *p += covered * (b - *p) + m * (q - b);
+                    }
+                    comp.ga[i] += m * covered * (1.0 - comp.ga[i]);
+                }
+            }
+            return;
+        }
         // Interior effects cover the clipped layers too, unless they blend with the layer as a
         // group: then the clipped layers paint over them, within the layer's shape whatever its
         // fill.
         let interior_grouped = l.block(b"infx").is_some_and(|b| b.first() == Some(&1));
         if !clips.is_empty() && !interior_grouped {
-            let c = &s.content;
-            let mut sub = Comp::new(raster_rect(c), Some(c.clone()), None, false);
+            // The clipped layers paint over the layer's color as if it were opaque; the layer's
+            // alpha then limits the result.
+            let mut c = s.content.clone();
+            for p in c.px.chunks_exact_mut(4).filter(|p| p[3] > 0.0) {
+                let a = p[3];
+                p.iter_mut().take(3).for_each(|v| *v = (*v / a).clamp(0.0, 1.0));
+                p[3] = 1.0;
+            }
+            let mut sub = Comp::new(raster_rect(&c), Some(c), None, false);
             self.composite_refs(clips, &mut sub);
             for (p, q) in s.content.px.chunks_exact_mut(4).zip(sub.cv.px.chunks_exact(4)) {
                 let raw = p[3];

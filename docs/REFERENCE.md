@@ -13,7 +13,7 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
-single color (118 of the 710, e.g. an adjustment over an empty canvas) count toward the total but not
+single color (119 of the 732, e.g. an adjustment over an empty canvas) count toward the total but not
 toward the feature rates, since they cannot show whether a feature renders right.
 
 Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
@@ -26,11 +26,13 @@ CI runs it on the test files of [psd-tools](https://github.com/psd-tools/psd-too
 [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd),
 [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk)
 [psd.js](https://github.com/meltingice/psd.js), [Krita](https://invent.kde.org/graphics/krita) (its PSD import tests) and
-[Aspose.PSD for .NET](https://github.com/aspose-psd/Aspose.PSD-for-.NET) (its example files), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
+[Aspose.PSD for .NET](https://github.com/aspose-psd/Aspose.PSD-for-.NET) (its example files) and
+[oov/psd](https://github.com/oov/psd) (its test data), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
 carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files or the Aspose
 examples written back by Aspose (names with Changed, Added, Edited, Merged, Flattened or `_out`,
 plus `CropTest.psd`, whose composite carries Aspose's evaluation watermark, and
-`ImageWithTextLayer.psd`, whose text layer Aspose wrote). None of the
+`ImageWithTextLayer.psd`, whose text layer Aspose wrote), nor oov/psd's files saved by other
+painting apps (no Photoshop version info). None of the
 files are committed here.
 
 ## Results
@@ -43,7 +45,8 @@ files are committed here.
 | PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
 | Krita `plugins/impex/psd/tests/data` | 20 / 20 |
 | Aspose.PSD `Examples/Data/PSD` | 191 / 199 (96.0%) |
-| All | 693 / 710 (97.6%) |
+| oov/psd `testdata` | 22 / 22 |
+| All | 715 / 732 (97.7%) |
 
 ### Misses
 
@@ -115,6 +118,10 @@ Measured against the stored composites:
   [pkh.me's reverse engineering](https://blog.pkh.me/p/22-understanding-selective-coloring-in-adobe-photoshop.html)).
 - **Outer glows** never show through a faded fill: under the layer only the part outside the shape
   remains, whatever the fill opacity (Aspose's FillOpacitySample).
+- **Clipping masks**: clipped layers paint over the base's color as if it were opaque; the base's
+  alpha then limits the group. With "Blend Clipped Layers as Group" off, the clipped layers blend
+  with their own modes onto what is below the base, within its pixels and at its opacity, and hide
+  the base where they cover it.
 - **Channel Mixer** in CMYK mixes ink, not the stored (inverted) values; each plate mixes the
   color plates or black from itself.
 - **CMYK merged images with transparency** are matted onto white in ink (ink × alpha), so the

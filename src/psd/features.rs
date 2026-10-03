@@ -78,7 +78,7 @@ impl Document {
         let mut out = BTreeSet::new();
         out.insert(format!("color mode: {:?}", self.color_mode));
         out.insert(format!("depth: {}", self.depth));
-        for l in self.layers.iter().filter(|l| !l.hidden) {
+        for (i, l) in self.layers.iter().enumerate().filter(|(_, l)| !l.hidden) {
             let mut add = |s: &str| {
                 out.insert(s.to_owned());
             };
@@ -152,6 +152,10 @@ impl Document {
             }
             if l.clipping {
                 add("clipping mask");
+            }
+            let clipped_above = self.layers.get(i + 1).is_some_and(|n| n.clipping);
+            if clipped_above && l.block(b"clbl").is_some_and(|b| b.first() == Some(&0)) {
+                add("clipping: not blended as group");
             }
             if let Some(m) = l.mask.as_ref().filter(|m| !m.disabled) {
                 add("layer mask");
