@@ -12,7 +12,14 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
-info block, as in the contents of some smart objects) are skipped.
+info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
+single color (42 of the 350, e.g. an adjustment over an empty canvas) count toward the total but not
+toward the feature rates, since they cannot show whether a feature renders right.
+
+Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
+Channel Mixer, Vibrance and Color Lookup appear in psd-tools only in `fill_adjustments.psd`, and in
+ag-psd only under a final Threshold or Gradient Map that flattens their effect, so their rates say
+little about them.
 
 CI runs it on the [psd-tools](https://github.com/psd-tools/psd-tools) and
 [ag-psd](https://github.com/Agamnentzar/ag-psd) test files, each pinned to a commit. Files ag-psd

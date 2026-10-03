@@ -11,6 +11,8 @@
 //! composite. A file matches when the mean difference is at most 2 (of 255) and at most 1% of
 //! pixels differ by more than 16. The test prints the result of every file and the match rate of
 //! every feature, and fails when fewer than `PSDC_REFERENCE_MIN` (default 0.95) of the files match.
+//! Files whose stored composite is a single color count toward the total but not toward the
+//! feature rates, since they cannot show whether a feature renders right.
 //! Without `PSDC_REFERENCE_DIR` it does nothing.
 
 use std::collections::BTreeMap;
@@ -58,7 +60,7 @@ fn compare(got: &Image, want: &Image) -> (f64, f64) {
 }
 
 enum Outcome {
-    Compared { mean: f64, off: f64, features: Vec<String> },
+    Compared { mean: f64, off: f64, uniform: bool, features: Vec<String> },
     Skipped(String),
 }
 
@@ -79,7 +81,8 @@ fn check(path: &Path, fonts: &FontDb) -> Outcome {
     let options = RenderOptions { keep_text_raster: true, ..Default::default() };
     let got = render(&doc, fonts, &options).image;
     let (mean, off) = compare(&got, &want);
-    Outcome::Compared { mean, off, features: doc.features() }
+    let uniform = want.data.chunks_exact(4).all(|p| p == &want.data[..4]);
+    Outcome::Compared { mean, off, uniform, features: doc.features() }
 }
 
 #[test]
@@ -99,18 +102,29 @@ fn matches_photoshop_composites() {
     let results: Vec<_> = files.par_iter().map(|p| (p, check(p, &fonts))).collect();
 
     let mut per_feature: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
-    let (mut compared, mut matched) = (0, 0);
+    let (mut compared, mut matched, mut uniforms) = (0, 0, 0);
     for (path, outcome) in &results {
         let name = path.display();
         match outcome {
             Outcome::Skipped(why) => println!("{:>16}  {name}  ({why})", "skip"),
-            Outcome::Compared { mean, off, features } => {
+            Outcome::Compared { mean, off, uniform, features } => {
                 let ok = *mean <= MAX_MEAN && *off <= MAX_OFF_PERCENT;
                 compared += 1;
                 matched += ok as usize;
-                println!("{mean:7.2} {off:6.2}%  {name}{}", if ok { "" } else { "  <<<" });
+                let note = if !ok {
+                    "  <<<"
+                } else if *uniform {
+                    "  (single color)"
+                } else {
+                    ""
+                };
+                println!("{mean:7.2} {off:6.2}%  {name}{note}");
                 if !ok {
                     println!("{:>17} {}", "", features.join(", "));
+                }
+                if *uniform {
+                    uniforms += 1;
+                    continue;
                 }
                 for f in features {
                     let e = per_feature.entry(f).or_default();
@@ -125,6 +139,6 @@ fn matches_photoshop_composites() {
         println!("{f:<40} {:>7} {:>5.0}%", format!("{ok}/{n}"), *ok as f64 * 100.0 / *n as f64);
     }
     let rate = matched as f64 / compared.max(1) as f64;
-    println!("\n{matched}/{compared} files match ({:.1}%)", rate * 100.0);
+    println!("\n{matched}/{compared} files match ({:.1}%); {uniforms} stored a single color", rate * 100.0);
     assert!(rate >= min, "{matched}/{compared} files match ({:.1}%), below {:.1}%", rate * 100.0, min * 100.0);
 }
