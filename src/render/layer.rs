@@ -338,7 +338,7 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
     if l.kind == LayerKind::Adjustment {
         match adjust::parse(l, cs, doc.color_mode) {
             Ok(f) => out.adjust = Some(f),
-            Err(e) => out.warnings.push(format!("{e} adjustment is not supported")),
+            Err(e) => out.warnings.push(format!("{e}; skipped")),
         }
         out.mask = mask::region(doc, l, true);
         return out;

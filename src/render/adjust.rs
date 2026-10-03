@@ -32,7 +32,14 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<Color
         b"post" => posterize(r),
         b"thrs" => threshold(r),
         b"blwh" => black_white(data, cs),
-        b"clrL" => return Err("color lookup"),
+        b"clrL" => {
+            // Version and descriptor version, then the descriptor.
+            let d = descriptor::parse_block(data, 6).map_err(|_| "malformed color lookup")?;
+            return match super::lut::parse(&d)? {
+                super::lut::Lookup::Identity => Ok(Box::new(|c| c)),
+                super::lut::Lookup::Table(t) => Ok(Box::new(move |c| t.apply(c))),
+            };
+        }
         _ => None,
     };
     f.ok_or("malformed adjustment")

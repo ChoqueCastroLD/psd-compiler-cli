@@ -10,6 +10,7 @@ pub(crate) mod distance;
 pub(crate) mod effects;
 pub(crate) mod fill;
 mod layer;
+mod lut;
 pub(crate) mod mask;
 pub(crate) mod save;
 mod smart;
@@ -691,6 +692,9 @@ pub(crate) fn render_inner(doc: &Document, fonts: &FontDb, options: &RenderOptio
     let ctx = Ctx { doc, fonts, options, cs: ColorSpace::new(doc) };
     let (w, h) = (doc.width as usize, doc.height as usize);
     let mut warnings = vec![];
+    if doc.color_mode == crate::psd::ColorMode::Duotone && doc.duotone.is_empty() {
+        warnings.push(Warning { layer: None, message: "duotone inks could not be read; showing grayscale".into() });
+    }
     let mut text_masks = vec![];
     let cv = if doc.layers.is_empty() {
         composite_image(&ctx)

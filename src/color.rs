@@ -18,6 +18,8 @@ pub(crate) struct ColorSpace {
     output: Option<(Arc<Transform8BitExecutor>, bool)>,
     /// Descriptor colors are linear light (32-bit documents).
     linear: bool,
+    /// Duotone appearance of each gray level, as sRGB.
+    duotone: Option<Arc<Vec<[u8; 3]>>>,
 }
 
 fn options() -> TransformOptions {
@@ -33,6 +35,11 @@ fn is_identity(t: &Transform8BitExecutor) -> bool {
 impl ColorSpace {
     pub fn new(doc: &Document) -> ColorSpace {
         let mut cs = ColorSpace { linear: doc.depth == 32, ..ColorSpace::default() };
+        if doc.color_mode == ColorMode::Duotone && !doc.duotone.is_empty() {
+            // The ink table already gives the final colors.
+            cs.duotone = Some(Arc::new(doc.duotone.clone()));
+            return cs;
+        }
         let Some(profile) = doc.icc_profile.as_deref().and_then(|b| ColorProfile::new_from_slice(b).ok()) else {
             return cs;
         };
@@ -93,11 +100,100 @@ impl ColorSpace {
 
     /// Converts a finished straight-alpha RGBA8 image from the document's space to sRGB.
     pub fn finish(&self, rgba: &mut [u8]) {
+        if let Some(table) = &self.duotone {
+            for p in rgba.chunks_exact_mut(4) {
+                let c = table[p[0] as usize];
+                p[..3].copy_from_slice(&c);
+            }
+            return;
+        }
         let Some((t, gray)) = &self.output else { return };
         let src: Vec<u8> =
             if *gray { rgba.chunks_exact(4).flat_map(|p| [p[0], p[3]]).collect() } else { rgba.to_vec() };
         let _ = t.transform(&src, rgba);
     }
+}
+
+/// The look of a duotone (or monotone, tritone, quadtone) image: the sRGB color of each gray level.
+///
+/// Photoshop stores a 256-entry Lab preview of the inks in image resource 1066 (`preview`); without
+/// it the inks and their curves from the color mode data are mixed on white paper. Empty when
+/// neither can be read, e.g. inks from a color book with no preview.
+pub(crate) fn duotone(color_data: &[u8], preview: Option<&[u8]>) -> Vec<[u8; 3]> {
+    let be = |b: &[u8], i: usize| b.get(i..i + 2).map(|v| u16::from_be_bytes([v[0], v[1]]));
+    if let Some(p) = preview {
+        let count = be(p, 2).unwrap_or(0) as usize;
+        let at = 4 + 10 * count;
+        if let Some(n) = be(p, at).filter(|&n| n == 256) {
+            if let Some(lab) = p.get(at + 2..at + 2 + 3 * n as usize) {
+                return lab
+                    .chunks_exact(3)
+                    .map(|c| {
+                        let rgb = lab_to_rgb(c[0] as f64 / 255.0 * 100.0, c[1] as f64 - 128.0, c[2] as f64 - 128.0);
+                        rgb.map(|v| (v * 255.0).round() as u8)
+                    })
+                    .collect();
+            }
+        }
+    }
+    let inks = be(color_data, 2).unwrap_or(0).min(4) as usize;
+    if inks == 0 || color_data.len() < 4 + 40 + 256 + 112 {
+        return vec![];
+    }
+    let mut colors = vec![];
+    for i in 0..inks {
+        let c = &color_data[4 + 10 * i..14 + 10 * i];
+        let v = |k: usize| u16::from_be_bytes([c[2 + 2 * k], c[3 + 2 * k]]) as f64;
+        let rgb = match u16::from_be_bytes([c[0], c[1]]) {
+            0 => [v(0), v(1), v(2)].map(|x| (x / 65535.0) as f32),
+            2 => ColorSpace::default().cmyk(
+                1.0 - v(0) / 65535.0,
+                1.0 - v(1) / 65535.0,
+                1.0 - v(2) / 65535.0,
+                1.0 - v(3) / 65535.0,
+            ),
+            7 => lab_to_rgb(v(0) / 100.0, v(1) as i16 as f64 / 100.0, v(2) as i16 as f64 / 100.0),
+            8 => [(1.0 - v(0) / 10000.0) as f32; 3],
+            _ => return vec![],
+        };
+        colors.push(rgb);
+    }
+    // Transfer curves: 13 points at these dot percentages, in tenths of a percent, -1 when unset.
+    const AT: [f64; 13] = [0.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0, 100.0];
+    let curves: Vec<Vec<(f64, f64)>> = (0..inks)
+        .map(|i| {
+            let base = 4 + 40 + 256 + 28 * i;
+            let mut pts: Vec<(f64, f64)> = (0..13)
+                .filter_map(|k| {
+                    let v = be(color_data, base + 2 * k)? as i16;
+                    (v >= 0).then(|| (AT[k] / 100.0, v as f64 / 1000.0))
+                })
+                .collect();
+            if pts.len() < 2 {
+                pts = vec![(0.0, 0.0), (1.0, 1.0)];
+            }
+            pts
+        })
+        .collect();
+    let curve = |pts: &[(f64, f64)], t: f64| {
+        let i = pts.windows(2).position(|w| t <= w[1].0).unwrap_or(pts.len() - 2);
+        let ((x0, y0), (x1, y1)) = (pts[i], pts[i + 1]);
+        let k = if x1 > x0 { ((t - x0) / (x1 - x0)).clamp(0.0, 1.0) } else { 1.0 };
+        y0 + (y1 - y0) * k
+    };
+    (0..256)
+        .map(|g| {
+            let dot = 1.0 - g as f64 / 255.0;
+            let mut out = [1.0f64; 3];
+            for (c, pts) in colors.iter().zip(&curves) {
+                let k = curve(pts, dot).clamp(0.0, 1.0);
+                for ch in 0..3 {
+                    out[ch] *= 1.0 - k * (1.0 - c[ch] as f64);
+                }
+            }
+            out.map(|v| (v * 255.0).round() as u8)
+        })
+        .collect()
 }
 
 /// CIE L*a*b* (D50, L in 0..=100) to sRGB in 0..=1.
@@ -113,6 +209,18 @@ pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> [f32; 3] {
         0.0719453 * x - 0.2289914 * y + 1.4052427 * z,
     ];
     lin.map(|v| srgb_encode(v) as f32)
+}
+
+/// sRGB in 0..=1 to CIE L*a*b* (D50); the inverse of [`lab_to_rgb`].
+pub(crate) fn rgb_to_lab(rgb: [f64; 3]) -> [f64; 3] {
+    let [r, g, b] = rgb.map(srgb_decode);
+    let x = 0.4360747 * r + 0.3850649 * g + 0.1430804 * b;
+    let y = 0.2225045 * r + 0.7168786 * g + 0.0606169 * b;
+    let z = 0.0139322 * r + 0.0971045 * g + 0.7141733 * b;
+    let f =
+        |t: f64| if t > (6.0f64 / 29.0).powi(3) { t.cbrt() } else { t / (3.0 * (6.0f64 / 29.0).powi(2)) + 4.0 / 29.0 };
+    let (fx, fy, fz) = (f(x / 0.96422), f(y), f(z / 0.82521));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
 /// Inverse of [`srgb_encode`].
@@ -191,6 +299,39 @@ mod tests {
         assert!(near(lab_to_rgb(0.0, 0.0, 0.0), [0.0; 3]));
         let red = lab_to_rgb(54.29, 80.81, 69.89);
         assert!(red[0] > 0.98 && red[1] < 0.05 && red[2] < 0.05, "{red:?}");
+    }
+
+    #[test]
+    fn lab_roundtrip() {
+        for rgb in [[0.2, 0.5, 0.9], [1.0, 0.0, 0.0], [0.0; 3], [1.0; 3], [0.7, 0.7, 0.1]] {
+            let lab = rgb_to_lab(rgb);
+            let back = lab_to_rgb(lab[0], lab[1], lab[2]);
+            assert!(back.iter().zip(&rgb).all(|(a, b)| (*a as f64 - b).abs() < 2e-3), "{rgb:?} -> {lab:?} -> {back:?}");
+        }
+    }
+
+    #[test]
+    fn duotone_from_preview_or_inks() {
+        // Version, one ink (Lab), then the 256-entry Lab table.
+        let mut preview = vec![0, 1, 0, 1, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0];
+        preview.extend((0..256).flat_map(|i| [i as u8, 128, 128]));
+        let t = duotone(&[], Some(&preview));
+        assert_eq!((t[0], t[255]), ([0; 3], [255; 3]));
+
+        // Monotone in pure red with a linear curve.
+        let mut data = vec![0, 1, 0, 1, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0];
+        data.extend([255; 30]);
+        data.extend([0; 256]);
+        let mut curve: Vec<u8> =
+            [0i16, -1, -1, -1, -1, -1, 500, -1, -1, -1, -1, -1, 1000, 0].iter().flat_map(|v| v.to_be_bytes()).collect();
+        curve.extend(std::iter::repeat_n(255, 28 * 3));
+        data.extend(curve);
+        data.extend([0; 2 + 110]);
+        let t = duotone(&data, None);
+        assert_eq!(t[0], [255, 0, 0]);
+        assert_eq!(t[255], [255, 255, 255]);
+        assert_eq!(t[128][0], 255);
+        assert!((126..=129).contains(&t[128][1]), "{:?}", t[128]);
     }
 
     #[test]

@@ -191,6 +191,8 @@ pub struct Document {
     pub(crate) global_angle: f64,
     pub(crate) global_altitude: f64,
     pub(crate) palette: Vec<[u8; 3]>,
+    /// The sRGB look of each gray level of a duotone document; empty otherwise.
+    pub(crate) duotone: Vec<[u8; 3]>,
     pub(crate) transparent_index: Option<u8>,
     pub(crate) composite: Vec<Vec<u8>>,
     pub(crate) patterns: HashMap<String, Pattern>,
@@ -662,6 +664,7 @@ impl Document {
             global_angle: 120.0,
             global_altitude: 30.0,
             palette: vec![],
+            duotone: vec![],
             transparent_index: None,
             composite: vec![],
             patterns: HashMap::new(),
@@ -790,6 +793,7 @@ impl Document {
         let mut global_altitude = 30.0;
         let mut transparent_index = None;
         let mut icc_profile = None;
+        let mut duotone_preview = None;
         while r.pos + 12 <= resources_end {
             if &r.tag()? != b"8BIM" {
                 break;
@@ -803,12 +807,15 @@ impl Document {
                 1037 if size >= 4 => global_angle = Reader::new(body).i32()? as f64,
                 1049 if size >= 4 => global_altitude = Reader::new(body).i32()? as f64,
                 1039 => icc_profile = Some(body.to_vec()),
+                1066 => duotone_preview = Some(body),
                 1047 if size >= 2 => transparent_index = Some(Reader::new(body).u16()?.min(255) as u8),
                 _ => {}
             }
             r.skip(size & 1)?;
         }
         r.pos = resources_end;
+        let duotone =
+            if color_mode == ColorMode::Duotone { crate::color::duotone(color_data, duotone_preview) } else { vec![] };
 
         let layer_mask_len = r.length()?;
         let layer_mask_end = r.pos + layer_mask_len;
@@ -858,6 +865,7 @@ impl Document {
             global_angle,
             global_altitude,
             palette,
+            duotone,
             transparent_index,
             composite,
             patterns,
