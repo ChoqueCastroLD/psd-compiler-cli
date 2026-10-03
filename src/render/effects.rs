@@ -525,7 +525,11 @@ impl Effects {
             }
         };
 
+        let mut knocked = Vec::new();
         for s in &self.drop_shadows {
+            if s.knocked_out {
+                knocked.push(p.below.len());
+            }
             let mut m = soft(grown(s.spread), s.size, s.spread, 0.0);
             m.iter_mut().for_each(|v| *v = shaped(&s.contour, *v));
             let (dx, dy) = offset(s.angle, s.distance);
@@ -645,6 +649,18 @@ impl Effects {
                 p.beside.push(Layered { cov, tint, mode: s.mode, opacity: s.opacity, knock: false });
             }
         }
+        if !knocked.is_empty() && !p.beside.is_empty() {
+            // Strokes beside the layer knock out its shadows too.
+            let mut keep = vec![1.0f32; w * h];
+            for e in &p.beside {
+                for (i, k) in keep.iter_mut().enumerate() {
+                    *k *= 1.0 - e.cov[i] * e.tint.at(i).1 * e.opacity;
+                }
+            }
+            for &j in &knocked {
+                p.below[j].cov.iter_mut().zip(&keep).for_each(|(v, k)| *v *= k);
+            }
+        }
         for b in &self.bevels {
             let d = dist.as_ref().expect("bevels need distances");
             let (hi, lo) = bevel_light(b, d, a, w, h);
@@ -687,14 +703,19 @@ fn shape_glow(g: &Glow, cov: &mut [f32]) {
 fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
     let size = b.size.max(0.5) as f32;
     let ramp = |t: f32| t.clamp(0.0, 1.0);
+    // A smooth pillow folds the blurred shape at the edge level; each side is lit by its own slope.
+    let mut fold = None;
     let mut height = if b.smooth {
-        // Smooth bevels are lit from the blurred shape, a pillow from its distance to the edge level
-        // over half the size.
+        // Smooth bevels are lit from the blurred shape; a pillow blurs over half its size.
         let mut g = a.to_vec();
         let size = if b.style == BevelStyle::Pillow { size * 0.5 } else { size };
         blur(&mut g, w, h, size as f64 * SIGMA_PER_SIZE, size as f64);
         if b.style == BevelStyle::Pillow {
-            g.iter_mut().for_each(|v| *v = 0.5 + (*v - 0.5).abs());
+            if b.soften > 0.0 {
+                g.iter_mut().for_each(|v| *v = 0.5 + (*v - 0.5).abs());
+            } else {
+                fold = Some(g.iter().map(|&v| if v >= 0.5 { 1.0 } else { -1.0 }).collect::<Vec<f32>>());
+            }
         }
         g
     } else {
@@ -718,6 +739,8 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
         height.iter_mut().for_each(|v| *v += far);
     }
     let lift = (b.depth * size as f64).max(0.01) as f32 * if b.up { 1.0 } else { -1.0 };
+    // A smooth pillow rises 0.6 of its depth on either side of the fold.
+    let lift = if b.smooth && b.style == BevelStyle::Pillow { lift * 0.6 } else { lift };
     let (th, alt) = (b.angle.to_radians(), b.altitude.to_radians());
     let light = [(th.cos() * alt.cos()) as f32, (-th.sin() * alt.cos()) as f32, alt.sin() as f32];
     let flat = light[2];
@@ -727,12 +750,13 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
         |x: isize, y: isize| height[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
     for y in 0..h as isize {
         for x in 0..w as isize {
-            let gx = (at(x + 1, y) - at(x - 1, y)) * 0.5 * lift;
-            let gy = (at(x, y + 1) - at(x, y - 1)) * 0.5 * lift;
+            let i = y as usize * w + x as usize;
+            let k = fold.as_ref().map_or(0.5 * lift, |f| 0.5 * lift * f[i]);
+            let gx = (at(x + 1, y) - at(x - 1, y)) * k;
+            let gy = (at(x, y + 1) - at(x, y - 1)) * k;
             let n = [-gx, -gy, 1.0];
             let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
             let shade = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
-            let i = y as usize * w + x as usize;
             if shade > flat {
                 hi[i] = ((shade - flat) / (1.0 - flat).max(1e-3)).min(1.0);
             } else {
