@@ -767,10 +767,12 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
     let ramp = |t: f32| t.clamp(0.0, 1.0);
     // A smooth pillow folds the blurred shape at the edge level; each side is lit by its own slope.
     let mut fold = None;
+    let halves = matches!(b.style, BevelStyle::Pillow | BevelStyle::Emboss);
     let mut height = if b.smooth {
-        // Smooth bevels are lit from the blurred shape; a pillow blurs over half its size.
+        // Smooth bevels are lit from the blurred shape; an emboss or pillow, half inside and half
+        // outside, blurs over half its size.
         let mut g = a.to_vec();
-        let size = if b.style == BevelStyle::Pillow { size * 0.5 } else { size };
+        let size = if halves { size * 0.5 } else { size };
         blur(&mut g, w, h, size as f64 * SIGMA_PER_SIZE, size as f64);
         if b.style == BevelStyle::Pillow {
             if b.soften > 0.0 {
@@ -801,8 +803,8 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
         height.iter_mut().for_each(|v| *v += far);
     }
     let lift = (b.depth * size as f64).max(0.01) as f32 * if b.up { 1.0 } else { -1.0 };
-    // A smooth pillow rises 0.6 of its depth on either side of the fold.
-    let lift = if b.smooth && b.style == BevelStyle::Pillow { lift * 0.6 } else { lift };
+    // A smooth emboss or pillow rises 0.6 of its depth (a pillow on either side of the fold).
+    let lift = if b.smooth && halves { lift * 0.6 } else { lift };
     let (th, alt) = (b.angle.to_radians(), b.altitude.to_radians());
     let light = [(th.cos() * alt.cos()) as f32, (-th.sin() * alt.cos()) as f32, alt.sin() as f32];
     let flat = light[2];
