@@ -170,6 +170,9 @@ pub(crate) struct Prepared {
     pub beside: Vec<Layered>,
     /// Folded into the layer, bottom to top.
     pub inner: Vec<Layered>,
+    /// How many of the first `inner` effects (overlays, satins, inner glows) "Blend Interior
+    /// Effects as Group" fades with the fill.
+    pub interior: usize,
 }
 
 impl Prepared {
@@ -561,6 +564,7 @@ impl Effects {
             let tint = glow_tint(g, &mut cov);
             p.inner.push(Layered { cov, tint, mode: g.mode, opacity: g.opacity });
         }
+        p.interior = p.inner.len();
         for s in &self.inner_shadows {
             let mut m = soft(shrunk_inverse(s.spread), s.size, s.spread, 1.0);
             m.iter_mut().for_each(|v| *v = 1.0 - shaped(&s.contour, 1.0 - *v));
@@ -703,7 +707,15 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
 ///
 /// `content` is premultiplied with the raw layer alpha; `region` is that alpha times the mask.
 /// Fill opacity scales the layer's paint but not the effects; `opacity` scales everything.
-pub(crate) fn assemble(content: &Raster, region: &[f32], fill: f32, opacity: f32, inner: &[Layered]) -> Raster {
+/// Folds `inner` effects into `content`; the fill applies before them, or after the first
+/// `grouped` ones.
+pub(crate) fn assemble(
+    content: &Raster,
+    region: &[f32],
+    (fill, grouped): (f32, usize),
+    opacity: f32,
+    inner: &[Layered],
+) -> Raster {
     let mut out = Raster { x: content.x, y: content.y, w: content.w, h: content.h, px: vec![0.0; content.px.len()] };
     for (i, (o, c)) in out.px.chunks_exact_mut(4).zip(content.px.chunks_exact(4)).enumerate() {
         let r = region[i];
@@ -711,9 +723,12 @@ pub(crate) fn assemble(content: &Raster, region: &[f32], fill: f32, opacity: f32
             continue;
         }
         let cs = if c[3] > 0.0 { [c[0] / c[3], c[1] / c[3], c[2] / c[3]] } else { [0.0; 3] };
-        let mut ac = fill;
-        let mut pc = cs.map(|v| v * fill);
-        for e in inner {
+        let (mut ac, mut pc) = if grouped == 0 { (fill, cs.map(|v| v * fill)) } else { (1.0, cs) };
+        for (j, e) in inner.iter().enumerate() {
+            if grouped > 0 && j == grouped {
+                ac *= fill;
+                pc = pc.map(|v| v * fill);
+            }
             let (color, ta) = e.tint.at(i);
             let k = e.cov[i] * ta * e.opacity;
             if k <= 0.0 {
@@ -725,6 +740,10 @@ pub(crate) fn assemble(content: &Raster, region: &[f32], fill: f32, opacity: f32
                 pc[ch] = (1.0 - k) * pc[ch] + k * ((1.0 - ac) * color[ch] + ac * mixed[ch]);
             }
             ac = k + (1.0 - k) * ac;
+        }
+        if grouped >= inner.len() && grouped > 0 {
+            ac *= fill;
+            pc = pc.map(|v| v * fill);
         }
         let s = r * opacity;
         o.copy_from_slice(&[pc[0] * s, pc[1] * s, pc[2] * s, ac * s]);
@@ -921,11 +940,14 @@ mod tests {
         let content = Raster { x: 0, y: 0, w: 1, h: 1, px: vec![1.0, 0.0, 0.0, 1.0] };
         let overlay =
             Layered { cov: vec![1.0], tint: Tint::Solid([0.0, 0.0, 1.0]), mode: BlendMode::Normal, opacity: 0.5 };
-        let out = assemble(&content, &[1.0], 1.0, 1.0, std::slice::from_ref(&overlay));
+        let out = assemble(&content, &[1.0], (1.0, 0), 1.0, std::slice::from_ref(&overlay));
         assert_eq!(out.px, [0.5, 0.0, 0.5, 1.0]);
-        let out = assemble(&content, &[1.0], 0.0, 1.0, &[overlay]);
+        let out = assemble(&content, &[1.0], (0.0, 0), 1.0, std::slice::from_ref(&overlay));
         assert_eq!(out.px, [0.0, 0.0, 0.5, 0.5]);
-        let out = assemble(&content, &[0.5], 1.0, 0.5, &[]);
+        let out = assemble(&content, &[0.5], (1.0, 0), 0.5, &[]);
         assert_eq!(out.px, [0.25, 0.0, 0.0, 0.25]);
+        // Blending interior effects as a group fades the overlay with the fill too.
+        let out = assemble(&content, &[1.0], (0.5, 1), 1.0, &[overlay]);
+        assert_eq!(out.px, [0.25, 0.0, 0.25, 0.5]);
     }
 }

@@ -537,7 +537,11 @@ impl Compositor<'_> {
             self.skip_refs(clips);
             return;
         }
-        if !clips.is_empty() {
+        // Interior effects cover the clipped layers too, unless they blend with the layer as a
+        // group: then the clipped layers paint over them, within the layer's shape whatever its
+        // fill.
+        let interior_grouped = l.block(b"infx").is_some_and(|b| b.first() == Some(&1));
+        if !clips.is_empty() && !interior_grouped {
             let c = &s.content;
             let mut sub = Comp::new(raster_rect(c), Some(c.clone()), None, false);
             self.composite_refs(clips, &mut sub);
@@ -577,7 +581,24 @@ impl Compositor<'_> {
             }
             f = 1.0;
         }
-        let mut body = effects::assemble(&s.content, &s.coverage, f, o, &s.prepared.inner);
+        let grouped = if interior_grouped { s.prepared.interior } else { 0 };
+        let mut body = effects::assemble(&s.content, &s.coverage, (f, grouped), 1.0, &s.prepared.inner);
+        if !clips.is_empty() && interior_grouped {
+            let mut sub = Comp::new(raster_rect(&body), Some(body.clone()), None, false);
+            self.composite_refs(clips, &mut sub);
+            for ((p, q), &shape) in body.px.chunks_exact_mut(4).zip(sub.cv.px.chunks_exact(4)).zip(&s.coverage) {
+                let a = q[3].min(shape.max(p[3]));
+                if q[3] > 0.0 {
+                    for ch in 0..3 {
+                        p[ch] = (q[ch] / q[3]).clamp(0.0, 1.0) * a;
+                    }
+                }
+                p[3] = a;
+            }
+        }
+        if o < 1.0 {
+            body.px.iter_mut().for_each(|v| *v *= o);
+        }
         if mode == BlendMode::Dissolve {
             dissolve(&mut body);
         }

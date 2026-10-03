@@ -10,8 +10,9 @@ use crate::psd::{ColorMode, Layer, ADJUSTMENT_KEYS};
 /// A color transform on straight RGB in 0..=1.
 pub(crate) type ColorFn = Box<dyn Fn([f32; 3]) -> [f32; 3] + Send + Sync>;
 
-/// Parses the adjustment of layer `l`; `Err` names an adjustment that is not supported.
-pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<ColorFn, &'static str> {
+/// Parses the adjustment of layer `l` in a document of color `mode` and bit `depth`; `Err` names
+/// an adjustment that is not supported.
+pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode, depth: u16) -> Result<ColorFn, &'static str> {
     let Some((key, data)) = ADJUSTMENT_KEYS.iter().find_map(|k| l.block(k).map(|b| (**k, b))) else {
         return Err("unknown adjustment");
     };
@@ -31,7 +32,7 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<Color
         b"grdm" => gradient_map(r),
         b"phfl" => photo_filter(r, cs),
         b"nvrt" => Some(Box::new(|c: [f32; 3]| c.map(|v| 1.0 - v)) as ColorFn),
-        b"post" => posterize(r),
+        b"post" => posterize(r, depth),
         b"thrs" => threshold(r, cs),
         b"blwh" => black_white(data, cs),
         b"clrL" => {
@@ -595,9 +596,12 @@ fn photo_filter(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     }))
 }
 
-fn posterize(r: &mut Reader) -> Option<ColorFn> {
+fn posterize(r: &mut Reader, depth: u16) -> Option<ColorFn> {
     let levels = r.u16().ok()?.clamp(2, 255) as f32;
-    Some(Box::new(move |c| c.map(|v| ((v * 255.0 / 256.0 * levels).floor() / (levels - 1.0)).min(1.0))))
+    // Level `i` takes the values `v` with `floor(v * levels / (max + 1)) == i`; 16-bit values run
+    // to 32768.
+    let k = if depth == 16 { 32768.0 / 32769.0 } else { 255.0 / 256.0 };
+    Some(Box::new(move |c| c.map(|v| ((v * k * levels).floor() / (levels - 1.0)).min(1.0))))
 }
 
 fn threshold(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
@@ -674,7 +678,7 @@ mod tests {
 
     #[test]
     fn simple_adjustments() {
-        let p = posterize(&mut Reader::new(&[0, 2])).unwrap();
+        let p = posterize(&mut Reader::new(&[0, 2]), 8).unwrap();
         assert_eq!(p([0.2, 0.6, 1.0]), [0.0, 1.0, 1.0]);
         let t = threshold(&mut Reader::new(&[0, 128]), &ColorSpace::default()).unwrap();
         assert_eq!(t([0.6, 0.6, 0.6]), [1.0; 3]);

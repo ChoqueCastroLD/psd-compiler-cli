@@ -379,7 +379,7 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
     let l = &doc.layers[index];
     let mut out = LayerOutput::default();
     if l.kind == LayerKind::Adjustment {
-        match adjust::parse(l, cs, doc.color_mode) {
+        match adjust::parse(l, cs, doc.color_mode, doc.depth) {
             Ok(f) => out.adjust = Some(f),
             Err(e) => out.warnings.push(format!("{e}; skipped")),
         }
