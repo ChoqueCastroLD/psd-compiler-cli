@@ -13,6 +13,7 @@ mod filters;
 mod layer;
 mod lut;
 pub(crate) mod mask;
+mod raster;
 pub(crate) mod save;
 mod smart;
 pub(crate) mod vector;

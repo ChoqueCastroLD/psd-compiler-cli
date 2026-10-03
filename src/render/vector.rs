@@ -1,8 +1,7 @@
-//! Vector masks and shape strokes: path records from `vmsk`/`vsms` rasterized with tiny-skia.
+//! Vector masks and shape strokes: path records from `vmsk`/`vsms`, outlined with tiny-skia and
+//! rasterized with exact-area coverage.
 
-use tiny_skia::{
-    FillRule, LineCap, LineJoin, Mask, MaskType, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
-};
+use tiny_skia::{FillRule, LineCap, LineJoin, PathBuilder, Stroke, StrokeDash};
 
 use crate::psd::descriptor::{Descriptor, Value};
 use crate::psd::reader::Reader;
@@ -105,9 +104,7 @@ fn components(paths: &[Subpath]) -> Vec<Vec<&Subpath>> {
 
 fn coverage(path: Option<tiny_skia::Path>, w: usize, h: usize, rule: FillRule) -> Vec<f32> {
     let Some(path) = path else { return vec![0.0; w * h] };
-    let Some(mut mask) = Mask::new(w as u32, h as u32) else { return vec![0.0; w * h] };
-    mask.fill_path(&path, rule, true, Transform::identity());
-    mask.data().iter().map(|&v| v as f32 / 255.0).collect()
+    super::raster::fill(&path, w, h, rule == FillRule::EvenOdd)
 }
 
 impl VectorMask {
@@ -233,32 +230,33 @@ impl ShapeStroke {
     pub fn rasterize(&self, mask: &VectorMask, x: i32, y: i32, w: usize, h: usize) -> Vec<f32> {
         let sided = self.align != Align::Center;
         let pen = if sided { 2.0 * self.width } else { self.width };
-        let mut out = vec![0f32; w * h];
-        let Some(mut pixmap) = Pixmap::new(w as u32, h as u32) else { return out };
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(0, 0, 0, 255);
-        let mut stroke = Stroke {
+        let stroke = Stroke {
             width: pen as f32,
             line_cap: self.cap,
             line_join: self.join,
             miter_limit: self.miter as f32,
             ..Default::default()
         };
+        let mut dash = None;
         if self.dashes.len() >= 2 {
             let mut d: Vec<f32> = self.dashes.iter().map(|&v| v.max(0.01) as f32).collect();
             if d.len() % 2 == 1 {
                 d.extend(d.clone());
             }
-            stroke.dash = StrokeDash::new(d, self.dash_offset as f32);
+            dash = StrokeDash::new(d, self.dash_offset as f32);
         }
+        let mut out = vec![0f32; w * h];
         for c in components(&mask.paths) {
-            if let Some(path) = build(&c, x as f64, y as f64) {
-                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            let Some(path) = build(&c, x as f64, y as f64) else { continue };
+            let path = match &dash {
+                Some(d) => path.dash(d, 1.0),
+                None => Some(path),
+            };
+            let Some(outline) = path.and_then(|p| p.stroke(&stroke, 1.0)) else { continue };
+            let line = super::raster::fill(&outline, w, h, false);
+            for (o, v) in out.iter_mut().zip(line) {
+                *o = *o + v - *o * v;
             }
-        }
-        let line = Mask::from_pixmap(pixmap.as_ref(), MaskType::Alpha);
-        for (o, &v) in out.iter_mut().zip(line.data()) {
-            *o = v as f32 / 255.0;
         }
         if sided {
             let fill = mask.rasterize(x, y, w, h);
