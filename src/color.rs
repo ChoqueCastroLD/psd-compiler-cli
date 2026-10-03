@@ -324,6 +324,54 @@ pub(crate) fn rgb_to_lab(rgb: [f64; 3]) -> [f64; 3] {
     [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
+const OKLAB_LMS: [[f64; 3]; 3] = [
+    [0.4122214708, 0.5363325363, 0.0514459929],
+    [0.2119034982, 0.6806995451, 0.1073969566],
+    [0.0883024619, 0.2817188376, 0.6299787005],
+];
+const OKLAB_LAB: [[f64; 3]; 3] = [
+    [0.2104542553, 0.7936177850, -0.0040720468],
+    [1.9779984951, -2.4285922050, 0.4505937099],
+    [0.0259040371, 0.7827717662, -0.8086757660],
+];
+
+fn mul(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
+}
+
+fn inverse(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let c = |r: usize, k: usize| {
+        let (r1, r2, k1, k2) = ((r + 1) % 3, (r + 2) % 3, (k + 1) % 3, (k + 2) % 3);
+        m[r1][k1] * m[r2][k2] - m[r1][k2] * m[r2][k1]
+    };
+    let det = m[0][0] * c(0, 0) + m[0][1] * c(0, 1) + m[0][2] * c(0, 2);
+    [0, 1, 2].map(|i| [0, 1, 2].map(|j| c(j, i) / det))
+}
+
+/// sRGB in 0..=1 to Oklab.
+pub(crate) fn rgb_to_oklab(rgb: [f64; 3]) -> [f64; 3] {
+    mul(&OKLAB_LAB, mul(&OKLAB_LMS, rgb.map(srgb_decode)).map(f64::cbrt))
+}
+
+/// Oklab to sRGB in 0..=1; the inverse of [`rgb_to_oklab`].
+pub(crate) fn oklab_to_rgb(lab: [f64; 3]) -> [f32; 3] {
+    static INVERSE: std::sync::LazyLock<[[[f64; 3]; 3]; 2]> =
+        std::sync::LazyLock::new(|| [inverse(&OKLAB_LAB), inverse(&OKLAB_LMS)]);
+    let lms = mul(&INVERSE[0], lab).map(|v| v * v * v);
+    mul(&INVERSE[1], lms).map(|v| srgb_encode(v) as f32)
+}
+
+#[cfg(test)]
+#[test]
+fn oklab_round_trips() {
+    let rgb = [0.9, 0.6, 0.2];
+    let back = oklab_to_rgb(rgb_to_oklab(rgb));
+    assert!(back.iter().zip(rgb).all(|(&a, b)| (a as f64 - b).abs() < 1e-4), "{back:?}");
+    // White is L = 1, a = b = 0.
+    let w = rgb_to_oklab([1.0; 3]);
+    assert!((w[0] - 1.0).abs() < 1e-4 && w[1].abs() < 1e-4 && w[2].abs() < 1e-4, "{w:?}");
+}
+
 /// Inverse of [`srgb_encode`].
 pub(crate) fn srgb_decode(v: f64) -> f64 {
     let v = v.clamp(0.0, 1.0);

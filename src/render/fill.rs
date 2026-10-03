@@ -29,8 +29,20 @@ pub(crate) struct Gradient {
     colors: Vec<Stop<[f32; 3]>>,
     alphas: Vec<Stop<f32>>,
     smooth: f64,
-    /// Colors hold Lab (L, a, b scaled to 0..=1), for Lab documents.
-    lab: bool,
+    space: Space,
+}
+
+/// The space color stops are interpolated in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Space {
+    /// Encoded RGB: Photoshop's "Classic" method.
+    Rgb,
+    /// L, a, b scaled to 0..=1, for Lab documents.
+    Lab,
+    /// Linear light: the "Linear" method.
+    Linear,
+    /// Oklab: the "Perceptual" method.
+    Oklab,
 }
 
 fn stops<T: Clone>(list: Option<&[Value]>, value: impl Fn(&Descriptor) -> T) -> Vec<Stop<T>> {
@@ -81,7 +93,28 @@ impl Gradient {
             alphas = vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }];
         }
         let smooth = (g.num("Intr").unwrap_or(4096.0) / 4096.0).clamp(0.0, 1.0);
-        Gradient { colors, alphas, smooth, lab }
+        Gradient { colors, alphas, smooth, space: if lab { Space::Lab } else { Space::Rgb } }
+    }
+
+    /// Applies the interpolation method of the descriptor holding the gradient (`gs99`).
+    fn interpolated(mut self, d: &Descriptor) -> Gradient {
+        let method = d.enumerated("gs99").or(d.enumerated("gradientsInterpolationMethod"));
+        let space = match method {
+            Some("Lnr ") => Space::Linear,
+            Some("Perc") => Space::Oklab,
+            _ => return self,
+        };
+        if self.space == Space::Rgb {
+            for c in &mut self.colors {
+                let rgb = c.value.map(|v| v as f64);
+                c.value = match space {
+                    Space::Linear => rgb.map(|v| color::srgb_decode(v) as f32),
+                    _ => color::rgb_to_oklab(rgb).map(|v| v as f32),
+                };
+            }
+            self.space = space;
+        }
+        self
     }
 
     /// Builds a gradient from `(location, midpoint, value)` stops, all in 0..=1.
@@ -99,7 +132,7 @@ impl Gradient {
             colors: build(colors, [0.0; 3]),
             alphas: build(alphas, 1.0),
             smooth: smooth.clamp(0.0, 1.0),
-            lab: false,
+            space: Space::Rgb,
         }
     }
 
@@ -129,7 +162,7 @@ impl Gradient {
             colors: vec![Stop { at: 0.0, mid: 0.5, value: pick(&lo) }, Stop { at: 1.0, mid: 0.5, value: pick(&hi) }],
             alphas: vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }],
             smooth: 0.0,
-            lab: false,
+            space: Space::Rgb,
         }
     }
 
@@ -192,11 +225,13 @@ impl Gradient {
 
     fn color(&self, t: f64) -> [f32; 3] {
         let c = [0, 1, 2].map(|i| self.ramp(&self.colors, t, |c| c[i]));
-        if self.lab {
-            let [l, a, b] = c.map(|v| v as f64);
-            return color::lab_to_rgb(l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0);
+        let v = c.map(|v| v as f64);
+        match self.space {
+            Space::Rgb => c,
+            Space::Lab => color::lab_to_rgb(v[0] * 100.0, v[1] * 255.0 - 128.0, v[2] * 255.0 - 128.0),
+            Space::Linear => v.map(|v| color::srgb_encode(v) as f32),
+            Space::Oklab => color::oklab_to_rgb(v),
         }
-        c
     }
 
     /// Straight RGBA at position `t` in 0..=1.
@@ -234,7 +269,8 @@ impl GradientFill {
             gradient: d
                 .desc("Grad")
                 .map(|g| Gradient::parse(g, cs))
-                .unwrap_or_else(|| Gradient::parse(&Descriptor::default(), cs)),
+                .unwrap_or_else(|| Gradient::parse(&Descriptor::default(), cs))
+                .interpolated(d),
             style: match d.enumerated("Type") {
                 Some("Rdl ") => Style::Radial,
                 Some("Angl") => Style::Angle,
@@ -459,7 +495,7 @@ mod tests {
             colors: vec![stop(0.0, [0.0; 3]), stop(1.0, [1.0; 3])],
             alphas: vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }],
             smooth: 0.0,
-            lab: false,
+            space: Space::Rgb,
         }
     }
 
@@ -470,6 +506,22 @@ mod tests {
         g.colors[1].mid = 0.25;
         assert_eq!(g.sample(0.25)[0], 0.5);
         assert_eq!(g.sample(2.0), [1.0; 4]);
+    }
+
+    #[test]
+    fn interpolation_methods_pick_the_space() {
+        let method = |m: &str| {
+            let d = Descriptor {
+                items: vec![("gs99".into(), Value::Enum("gradientInterpolationMethodType".into(), m.into()))],
+                ..Default::default()
+            };
+            bw().interpolated(&d).sample(0.5)[0]
+        };
+        assert_eq!(method("Gcls"), 0.5);
+        // Linear light: half the light of white.
+        assert!((method("Lnr ") - 0.735).abs() < 0.002, "{}", method("Lnr "));
+        // Oklab: half the lightness, an eighth of the light.
+        assert!((method("Perc") - 0.389).abs() < 0.002, "{}", method("Perc"));
     }
 
     #[test]
