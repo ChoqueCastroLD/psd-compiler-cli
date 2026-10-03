@@ -55,14 +55,17 @@ pub(crate) fn psd_edits(
     for (i, l) in doc.layers.iter().enumerate() {
         let mut w = vec![];
         let raster = if l.edited && l.kind == LayerKind::Text {
-            super::layer::text_raster(doc, l, fonts, 0, &mut w).ok()
+            super::layer::text_raster(doc, &ctx.cs, l, fonts, 0, &mut w).ok()
         } else if l.kind == LayerKind::SmartObject && l.smart_id().is_some_and(|id| doc.edited.contains_key(&id)) {
             Some(super::smart::render(&ctx, l, 0, &mut w))
         } else {
             None
         };
         warnings.extend(w.into_iter().map(|message| Warning { layer: Some(l.name.clone()), message }));
-        if let Some(r) = raster {
+        if let Some(mut r) = raster {
+            if let Some(r) = r.as_mut() {
+                ctx.cs.encode_linear(&mut r.px);
+            }
             let px = r.as_ref().map_or_else(|| Pixels { rect: Rect::default(), rgba: vec![] }, pixels_of);
             edits.layers.insert(i, px);
         }

@@ -151,7 +151,8 @@ fn edited_text_is_written_in_every_color_mode() {
     let cases: [Case; 5] = [
         ("CMYK", 4, 8, vec![], [255; 4], 2),
         ("Lab", 9, 16, vec![], [255, 128, 128, 255], 3),
-        ("gray 32-bit", 1, 32, vec![], [255; 4], 1),
+        // Composited in linear light, where the 8-bit edge alpha rounds to 2 levels after encoding.
+        ("gray 32-bit", 1, 32, vec![], [255; 4], 2),
         ("duotone", 8, 8, vec![], [255; 4], 1),
         ("indexed", 2, 8, gray_palette, [255; 4], 1),
     ];

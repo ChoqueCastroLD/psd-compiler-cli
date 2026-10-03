@@ -31,6 +31,9 @@ pub enum BlendMode {
     Color,
     Luminosity,
     PassThrough,
+    /// Keeps the backdrop color (internal: what Hue, Saturation and Color do to grays).
+    #[doc(hidden)]
+    Backdrop,
 }
 
 impl BlendMode {
@@ -66,6 +69,19 @@ impl BlendMode {
             "lum" | "Lmns" => BlendMode::Luminosity,
             "pass" => BlendMode::PassThrough,
             _ => BlendMode::Normal,
+        }
+    }
+
+    /// The separable mode that acts like `self` on gray source and backdrop, for passes that
+    /// carry independent grays in each channel (the black plate of CMYK documents).
+    pub(crate) fn on_grays(self) -> BlendMode {
+        use BlendMode::*;
+        match self {
+            Hue | Saturation | Color => Backdrop,
+            Luminosity => Normal,
+            DarkerColor => Darken,
+            LighterColor => Lighten,
+            m => m,
         }
     }
 
@@ -111,6 +127,7 @@ impl BlendMode {
             Divide if b <= 0.0 => 0.0,
             Divide if s <= 0.0 => 1.0,
             Divide => (b / s).min(1.0),
+            Backdrop => b,
             _ => s,
         }
     }

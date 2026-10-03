@@ -29,8 +29,6 @@ pub(crate) struct Gradient {
     colors: Vec<Stop<[f32; 3]>>,
     alphas: Vec<Stop<f32>>,
     smooth: f64,
-    /// Interpolate in linear light (32-bit documents).
-    linear: bool,
 }
 
 fn stops<T: Clone>(list: Option<&[Value]>, value: impl Fn(&Descriptor) -> T) -> Vec<Stop<T>> {
@@ -72,7 +70,7 @@ impl Gradient {
             alphas = vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }];
         }
         let smooth = (g.num("Intr").unwrap_or(4096.0) / 4096.0).clamp(0.0, 1.0);
-        Gradient { colors, alphas, smooth, linear: cs.is_linear() }
+        Gradient { colors, alphas, smooth }
     }
 
     /// Builds a gradient from `(location, midpoint, value)` stops, all in 0..=1.
@@ -86,12 +84,7 @@ impl Gradient {
             }
             s
         }
-        Gradient {
-            colors: build(colors, [0.0; 3]),
-            alphas: build(alphas, 1.0),
-            smooth: smooth.clamp(0.0, 1.0),
-            linear: false,
-        }
+        Gradient { colors: build(colors, [0.0; 3]), alphas: build(alphas, 1.0), smooth: smooth.clamp(0.0, 1.0) }
     }
 
     fn noise(g: &Descriptor) -> Gradient {
@@ -120,7 +113,6 @@ impl Gradient {
             colors: vec![Stop { at: 0.0, mid: 0.5, value: pick(&lo) }, Stop { at: 1.0, mid: 0.5, value: pick(&hi) }],
             alphas: vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }],
             smooth: 0.0,
-            linear: false,
         }
     }
 
@@ -138,23 +130,22 @@ impl Gradient {
                 }
                 let u = (t - a.at) / span;
                 let u = if u < a.mid { 0.5 * u / a.mid } else { 0.5 + 0.5 * (u - a.mid) / (1.0 - a.mid) };
-                let u = u + (smoothstep(u) - u) * self.smooth;
+                // Photoshop's smoothness bends the ramp about 78% of the way to a smoothstep.
+                let u = u + (smoothstep(u) - u) * self.smooth * 0.78;
                 return mix(a.value, b.value, u as f32);
             }
         }
         s[s.len() - 1].value
     }
 
+    fn color(&self, t: f64) -> [f32; 3] {
+        self.ramp(&self.colors, t, |a, b, u| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * u))
+    }
+
     /// Straight RGBA at position `t` in 0..=1.
     pub fn sample(&self, t: f64) -> [f32; 4] {
         let t = t.clamp(0.0, 1.0);
-        let c = if self.linear {
-            let lin = |v: f32| color::srgb_decode(v as f64) as f32;
-            let c = self.ramp(&self.colors, t, |a, b, u| [0, 1, 2].map(|i| lin(a[i]) + (lin(b[i]) - lin(a[i])) * u));
-            c.map(|v| color::srgb_encode(v as f64) as f32)
-        } else {
-            self.ramp(&self.colors, t, |a, b, u| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * u))
-        };
+        let c = self.color(t);
         let a = self.ramp(&self.alphas, t, |a, b, u| a + (b - a) * u);
         [c[0], c[1], c[2], a]
     }
@@ -209,17 +200,29 @@ impl GradientFill {
         let cy = (b[1] + b[3]) / 2.0 + self.offset.1 * bh;
         let th = self.angle.to_radians();
         let (cos, sin) = (th.cos(), th.sin());
-        let (dx, dy) = (px - cx, py - cy);
-        let along = dx * cos - dy * sin;
-        let across = dx * sin + dy * cos;
-        let len = ((bw * cos).abs() + (bh * sin).abs()).max(1.0) * self.scale;
+        let half = ((bw * cos).abs() + (bh * sin).abs()).max(1.0) * self.scale / 2.0;
+        // Photoshop snaps the end points to whole pixels, which matters for small boxes.
+        let (sx, sy) = match self.style {
+            Style::Linear => ((cx - cos * half).floor(), (cy + sin * half).floor()),
+            _ => (cx.floor(), cy.floor()),
+        };
+        let (ex, ey) = ((cx + cos * half).floor(), (cy - sin * half).floor());
+        let (mut vx, mut vy) = (ex - sx, ey - sy);
+        let mut len = vx.hypot(vy);
+        if len < 1.0 {
+            (vx, vy, len) = (cos, -sin, 1.0);
+        }
+        let (ux, uy) = (vx / len, vy / len);
+        let (dx, dy) = (px - sx, py - sy);
+        let along = dx * ux + dy * uy;
+        let across = dx * uy - dy * ux;
         let t = match self.style {
-            Style::Linear => 0.5 + along / len,
-            Style::Reflected => along.abs() * 2.0 / len,
-            Style::Radial => (dx * dx + dy * dy).sqrt() * 2.0 / len,
-            Style::Diamond => (along.abs() + across.abs()) * 2.0 / len,
+            Style::Linear => along / len,
+            Style::Reflected => along.abs() / len,
+            Style::Radial => (dx * dx + dy * dy).sqrt() / len,
+            Style::Diamond => (along.abs() + across.abs()) / len,
             Style::Angle => {
-                let a = (-dy).atan2(dx) - th;
+                let a = (-dy).atan2(dx) - (-uy).atan2(ux);
                 1.0 - (a / (2.0 * PI)).rem_euclid(1.0)
             }
         };
@@ -320,6 +323,7 @@ impl Fill {
     pub fn render(
         &self,
         doc: &Document,
+        cs: &ColorSpace,
         x: i32,
         y: i32,
         w: usize,
@@ -328,6 +332,15 @@ impl Fill {
         bounds: [f64; 4],
     ) -> Raster {
         let mut r = Raster { x, y, w, h, px: vec![0.0; w * h * 4] };
+        // CMYK plates need the pattern in working values.
+        let working = match self {
+            Fill::Pattern(p) if cs.plane().is_some() => doc.patterns.get(&p.id).map(|pat| {
+                let mut pat = pat.clone();
+                cs.srgb_rgba8_to_working(&mut pat.rgba);
+                pat
+            }),
+            _ => None,
+        };
         let canvas = [0.0, 0.0, doc.width as f64, doc.height as f64];
         let sample: Box<dyn Fn(f64, f64) -> [f32; 4] + Sync> = match self {
             Fill::Solid(c) => {
@@ -338,10 +351,19 @@ impl Fill {
                 let b = if g.align { bounds } else { canvas };
                 Box::new(move |px, py| g.gradient.sample(g.position(px, py, b)))
             }
-            Fill::Pattern(p) => match doc.patterns.get(&p.id) {
+            Fill::Pattern(p) => match working.as_ref().or(doc.patterns.get(&p.id)) {
                 Some(pat) => {
                     let origin = if p.align { (0.0, 0.0) } else { (bounds[0], bounds[1]) };
-                    Box::new(move |px, py| p.sample(pat, px, py, origin))
+                    let linear = cs.is_linear();
+                    Box::new(move |px, py| {
+                        let s = p.sample(pat, px, py, origin);
+                        if linear {
+                            let c = cs.srgb_to_working([s[0], s[1], s[2]]);
+                            [c[0], c[1], c[2], s[3]]
+                        } else {
+                            s
+                        }
+                    })
                 }
                 None => Box::new(|_, _| [0.0; 4]),
             },
@@ -375,7 +397,6 @@ mod tests {
             colors: vec![stop(0.0, [0.0; 3]), stop(1.0, [1.0; 3])],
             alphas: vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }],
             smooth: 0.0,
-            linear: false,
         }
     }
 

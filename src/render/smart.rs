@@ -36,6 +36,41 @@ impl Source {
         Source { w, h, px }
     }
 
+    /// Converts sRGB pixels to the working values of `cs` (CMYK plates or linear light).
+    fn convert_to_working(&mut self, cs: &crate::color::ColorSpace) {
+        if cs.is_linear() {
+            for p in self.px.chunks_exact_mut(4).filter(|p| p[3] > 0.0) {
+                let c = cs.srgb_to_working([p[0] / p[3], p[1] / p[3], p[2] / p[3]]);
+                for i in 0..3 {
+                    p[i] = c[i] * p[3];
+                }
+            }
+            return;
+        }
+        if cs.plane().is_none() {
+            return;
+        }
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let mut rgba: Vec<u8> = self
+            .px
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = p[3];
+                if a > 0.0 {
+                    [q(p[0] / a), q(p[1] / a), q(p[2] / a), 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        cs.srgb_rgba8_to_working(&mut rgba);
+        for (p, c) in self.px.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+            for i in 0..3 {
+                p[i] = c[i] as f32 / 255.0 * p[3];
+            }
+        }
+    }
+
     /// Half size, averaging 2x2 blocks.
     fn halve(&self) -> Source {
         let (w, h) = (self.w.div_ceil(2), self.h.div_ceil(2));
@@ -240,6 +275,8 @@ pub(crate) fn render(ctx: &Ctx, l: &Layer, margin: usize, warnings: &mut Vec<Str
     if src.w == 0 || src.h == 0 {
         return None;
     }
+    let mut src = src;
+    src.convert_to_working(&ctx.cs);
     let corners = placed.list("nonAffineTransform").or(placed.list("Trnf")).map(numbers).filter(|c| c.len() == 8)?;
     let quad = [(corners[0], corners[1]), (corners[2], corners[3]), (corners[4], corners[5]), (corners[6], corners[7])];
     let warp_desc = placed.desc("warp");

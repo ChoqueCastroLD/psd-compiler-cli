@@ -4,7 +4,7 @@
 //! layers); [`assemble`] then folds the interior ones into the layer's own pixels.
 
 use super::canvas::Raster;
-use super::distance::{blur, distances, downsample, Distances, SS};
+use super::distance::{blur, distances, downsample, edge_offsets, soft_distance, Distances, SS};
 use super::fill::{Fill, Gradient, GradientFill};
 use crate::blend::BlendMode;
 use crate::color::{self, ColorSpace};
@@ -205,15 +205,15 @@ fn light_angle(d: &Descriptor, global: f64) -> f64 {
     }
 }
 
-/// Reads an `lfx2`/`lmfx` descriptor.
+/// Reads an `lfx2`/`lmfx`/`lfxs` descriptor.
 pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects {
     let mut e = Effects::default();
     if fx.bool("masterFXSwitch") == Some(false) {
         return e;
     }
     let (ga, galt) = (doc.global_angle, doc.global_altitude);
-    let scale = fx.num("Scl ").unwrap_or(100.0) / 100.0;
-    let px = |d: &Descriptor, key: &str, default: f64| d.num(key).unwrap_or(default) * scale;
+    // Sizes are stored already scaled: `Scl ` only records the last Scale Effects.
+    let px = |d: &Descriptor, key: &str, default: f64| d.num(key).unwrap_or(default);
     let shadow = |d: &Descriptor| {
         let size = px(d, "blur", 5.0);
         Shadow {
@@ -398,6 +398,7 @@ impl Effects {
     pub fn prepare(
         &self,
         doc: &Document,
+        cs: &ColorSpace,
         a: &[f32],
         path: Option<&[f32]>,
         rect: (i32, i32, usize, usize),
@@ -434,7 +435,7 @@ impl Effects {
         let fill_tint = |f: &Fill| match f {
             Fill::Solid(c) => Tint::Solid(*c),
             _ => {
-                let r = f.render(doc, x, y, w, h, None, bounds);
+                let r = f.render(doc, cs, x, y, w, h, None, bounds);
                 Tint::Map(
                     r.px.chunks_exact(4)
                         .map(|q| if q[3] > 0.0 { [q[0] / q[3], q[1] / q[3], q[2] / q[3], q[3]] } else { [0.0; 4] })
@@ -508,40 +509,42 @@ impl Effects {
             let cov = shift(&m, w, h, dx, dy, 1.0);
             p.inner.push(Layered { cov, tint: Tint::Solid(s.color), mode: s.mode, opacity: s.opacity });
         }
-        let traced = path.filter(|_| !self.strokes.is_empty()).map(|v| {
-            let union: Vec<f32> = v.iter().zip(a).map(|(&p, &q)| p.max(q)).collect();
-            distances(&union, w, h, true, self.max_distance() + 1.0)
-        });
+        // Strokes measure from pixel centers: a pixel's distance outward is the cheapest
+        // `|p - q| + 1 - alpha(q)` over covered pixels, inward `|p - q| + alpha(q)` over pixels
+        // that are not fully covered; the stroke covers `size + 1 - distance`.
+        let shape: Option<Vec<f32>> = path.map(|v| v.iter().zip(a).map(|(&p, &q)| p.max(q)).collect());
+        let src = shape.as_deref().unwrap_or(a);
+        let reach = self.strokes.iter().map(|s| s.size as f32).fold(0.0, f32::max) + 1.0;
+        let need = |f: fn(&StrokePosition) -> bool| self.strokes.iter().any(|s| f(&s.position));
+        let edge = if self.strokes.is_empty() { vec![] } else { edge_offsets(src, w, h) };
+        let outward = need(|p| *p != StrokePosition::Inside)
+            .then(|| soft_distance(|i| (src[i] > 0.0).then(|| 0.5 + edge[i]), w, h, reach));
+        let inward = need(|p| *p != StrokePosition::Outside)
+            .then(|| soft_distance(|i| (src[i] < 1.0).then(|| 0.5 - edge[i]), w, h, reach));
         for s in &self.strokes {
-            let d = traced.as_ref().or(dist.as_ref()).expect("strokes need distances");
-            let r = (s.size * SS as f64) as f32;
+            let r = s.size as f32;
             let (inner_r, outer_r) = match s.position {
                 StrokePosition::Outside => (0.0, r),
                 StrokePosition::Inside => (r, 0.0),
                 StrokePosition::Center => (r / 2.0, r / 2.0),
             };
-            let inside = downsample(|i| d.inside[i] && inner_r > 0.0 && d.inward[i] <= inner_r * inner_r, w, h);
-            let band = downsample(|i| !d.inside[i] && outer_r > 0.0 && d.outside[i] <= outer_r * outer_r, w, h);
+            let band = |d: &Option<Vec<f32>>, r: f32| -> Vec<f32> {
+                d.as_ref().map_or(vec![0.0; w * h], |d| d.iter().map(|&d| (r + 1.0 - d).clamp(0.0, 1.0)).collect())
+            };
             let tint = fill_tint(&s.fill);
-            let share: Vec<f32> =
-                inside.iter().zip(a).map(|(&v, &r)| if r > 1e-6 { (v.min(r) / r).min(1.0) } else { 0.0 }).collect();
             if inner_r > 0.0 {
-                p.inner.push(Layered { cov: share, tint: tint.clone(), mode: s.mode, opacity: s.opacity });
+                let band = band(&inward, inner_r);
+                // On shapes the stroke follows the path, also where the fill is transparent.
+                if let Some(v) = path {
+                    let cov = band.iter().zip(v).zip(a).map(|((&c, &p), &q)| c * (p - q).max(0.0)).collect();
+                    p.beside.push(Layered { cov, tint: tint.clone(), mode: s.mode, opacity: s.opacity });
+                }
+                let cov = band.iter().zip(a).map(|(&c, &q)| if q > 1e-6 { c } else { 0.0 }).collect();
+                p.inner.push(Layered { cov, tint: tint.clone(), mode: s.mode, opacity: s.opacity });
             }
             if outer_r > 0.0 {
-                // Outside a pixel layer's translucent parts, the stroke shows through from below.
-                let under = if path.is_none() && s.position == StrokePosition::Outside {
-                    downsample(|i| d.inside[i], w, h)
-                } else {
-                    vec![0.0; w * h]
-                };
-                let beside = band
-                    .iter()
-                    .zip(&under)
-                    .zip(a)
-                    .map(|((&b, &u), &r)| (b + u * (1.0 - r)).min(1.0 - r).max(0.0))
-                    .collect();
-                p.beside.push(Layered { cov: beside, tint, mode: s.mode, opacity: s.opacity });
+                let cov = band(&outward, outer_r).iter().zip(src).map(|(&c, &q)| c * (1.0 - q)).collect();
+                p.beside.push(Layered { cov, tint, mode: s.mode, opacity: s.opacity });
             }
         }
         for b in &self.bevels {
@@ -558,6 +561,11 @@ impl Effects {
             if b.style != BevelStyle::Inner {
                 p.beside.push(Layered { cov: outer(&lo), tint: Tint::Solid(sc), mode: sm, opacity: so });
                 p.beside.push(Layered { cov: outer(&hi), tint: Tint::Solid(hc), mode: hm, opacity: ho });
+            }
+        }
+        if cs.plane() == Some(1) {
+            for e in p.below.iter_mut().chain(&mut p.inner).chain(&mut p.beside) {
+                e.mode = e.mode.on_grays();
             }
         }
         p
@@ -702,7 +710,7 @@ mod tests {
             ("Clr ", rgb(0.0, 0.0, 255.0)),
         ]);
         let fx = desc(vec![
-            ("Scl ", Value::Unit("#Prc".into(), 200.0)),
+            ("Scl ", Value::Unit("#Prc".into(), 200.0)), // sizes are stored scaled already
             ("DrSh", Value::Descriptor(shadow)),
             ("FrFX", Value::Descriptor(stroke)),
             ("OrGl", Value::Descriptor(desc(vec![("enab", Value::Bool(false))]))),
@@ -711,13 +719,13 @@ mod tests {
         let s = &e.drop_shadows[0];
         assert_eq!(s.color, [1.0, 0.0, 0.0]);
         assert_eq!(s.mode, BlendMode::Multiply);
-        assert_eq!((s.angle, s.distance, s.size, s.spread), (90.0, 8.0, 16.0, 4.0));
+        assert_eq!((s.angle, s.distance, s.size, s.spread), (90.0, 4.0, 8.0, 2.0));
         assert_eq!(s.opacity, 0.5);
         assert_eq!(e.strokes[0].position, StrokePosition::Inside);
-        assert_eq!(e.strokes[0].size, 6.0);
+        assert_eq!(e.strokes[0].size, 3.0);
         assert_eq!(e.strokes[0].fill, Fill::Solid([0.0, 0.0, 1.0]));
         assert!(e.outer_glows.is_empty());
-        assert_eq!(e.reach(), 26.0);
+        assert_eq!(e.reach(), 14.0);
     }
 
     #[test]
@@ -759,12 +767,12 @@ mod tests {
         };
         let area = |v: &[f32]| v.iter().sum::<f32>();
         let e = Effects { strokes: vec![stroke(2.0, StrokePosition::Outside)], ..Default::default() };
-        let p = e.prepare(&doc(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
         assert!(p.inner.is_empty());
         let outside = area(&p.beside[0].cov);
         assert!(outside > 4.0 * 5.0 * 2.0 && outside < 81.0 - 25.0, "{outside}");
         let e = Effects { strokes: vec![stroke(1.0, StrokePosition::Inside)], ..Default::default() };
-        let p = e.prepare(&doc(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
         assert!(p.beside.is_empty());
         assert!((area(&p.inner[0].cov) - 16.0).abs() < 1.0);
     }
@@ -784,7 +792,7 @@ mod tests {
             knocked_out: false,
         };
         let e = Effects { inner_shadows: vec![s], ..Default::default() };
-        let p = e.prepare(&doc(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);
         let cov = &p.inner[0].cov;
         assert_eq!(cov[12 * w + 7], 0.0);
         assert_eq!(cov[12 * w + 16], 1.0);
@@ -808,7 +816,7 @@ mod tests {
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
         };
         let e = Effects { bevels: vec![b], ..Default::default() };
-        let p = e.prepare(&doc(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);
         let (lo, hi) = (&p.inner[0].cov, &p.inner[1].cov);
         assert!(hi[15 * w + 6] > 0.3 && lo[15 * w + 6] == 0.0);
         assert!(lo[15 * w + 23] > 0.3 && hi[15 * w + 23] == 0.0);

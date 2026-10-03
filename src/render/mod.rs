@@ -387,10 +387,19 @@ impl Compositor<'_> {
                 } else if let Some(content) = out.content {
                     let source =
                         Source { content, coverage: out.coverage, effects: out.effects, prepared: out.prepared };
-                    self.draw_source(l, l.blend_mode, source, clips, comp);
+                    self.draw_source(l, self.mode(l.blend_mode), source, clips, comp);
                 }
             }
             Node::Group(i, children) => self.draw_group(*i, children, clips, comp),
+        }
+    }
+
+    /// `m` as this pass applies it.
+    fn mode(&self, m: BlendMode) -> BlendMode {
+        if self.ctx.cs.plane() == Some(1) {
+            m.on_grays()
+        } else {
+            m
         }
     }
 
@@ -398,14 +407,14 @@ impl Compositor<'_> {
         let o = ratio(l.opacity) * ratio(l.fill_opacity);
         let w = |x: i32, y: i32| mask.at(x, y) * o;
         if clips.is_empty() {
-            comp.adjust(f.as_ref(), l.blend_mode, w);
+            comp.adjust(f.as_ref(), self.mode(l.blend_mode), w);
             return;
         }
         let mut target = comp.cv.clone();
         target.adjust(f.as_ref(), BlendMode::Normal, |_, _| 1.0);
         let mut sub = Comp::new(comp.rect(), Some(target), None, false);
         self.composite_refs(clips, &mut sub);
-        comp.adjust_to(&sub.cv, l.blend_mode, w);
+        comp.adjust_to(&sub.cv, self.mode(l.blend_mode), w);
     }
 
     /// Bounds of what `node` paints, if anything.
@@ -489,7 +498,7 @@ impl Compositor<'_> {
         });
         let mut sub = Comp::new(rect, init, None, false);
         self.composite(children, &mut sub, true);
-        let mode = if l.blend_mode == BlendMode::PassThrough { BlendMode::Normal } else { l.blend_mode };
+        let mode = if l.blend_mode == BlendMode::PassThrough { BlendMode::Normal } else { self.mode(l.blend_mode) };
         let source = Source::new(sub.cv, mask, effects);
         self.draw_source(l, mode, source, clips, comp);
     }
@@ -551,7 +560,7 @@ impl Compositor<'_> {
             } else {
                 alpha_bounds(c)
             };
-            s.prepared = s.effects.prepare(self.ctx.doc, &s.coverage, None, rect, f, bounds);
+            s.prepared = s.effects.prepare(self.ctx.doc, &self.ctx.cs, &s.coverage, None, rect, f, bounds);
         }
         for e in &s.prepared.below {
             comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, None), None, e.mode, 0);
@@ -668,17 +677,43 @@ fn composite_image(ctx: &Ctx) -> Raster {
     let n = w * h;
     let ch = |c: usize| doc.composite.get(c).filter(|v| v.len() >= n).map(Vec::as_slice);
     let colors = doc.color_mode.channels().min(4);
-    let alpha = match doc.color_mode {
-        crate::psd::ColorMode::Cmyk | crate::psd::ColorMode::Multichannel | crate::psd::ColorMode::Indexed => None,
-        _ if doc.channel_count as usize > colors => ch(colors),
-        _ => None,
-    };
+    let alpha = if doc.merged_alpha || doc.layers.is_empty() { ch(colors) } else { None };
     let channels = [0, 1, 2, 3].map(|c| if c < colors { ch(c) } else { None });
     r.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         let s = |c| layer::row(c, y, w);
-        layer::decode_row(doc, &ctx.cs, channels.map(s), s(alpha), w, row);
+        layer::decode_row(doc, &ctx.cs, channels.map(s), None, w, row);
+        // Photoshop mattes the merged image onto white; take the white back out.
+        if let Some(a) = s(alpha) {
+            for (p, &a) in row.chunks_exact_mut(4).zip(a) {
+                let a = a as f32 / 255.0;
+                for c in &mut p[..3] {
+                    *c = (*c - (1.0 - a)).clamp(0.0, a);
+                }
+                p[3] = a;
+            }
+        }
     });
     r
+}
+
+impl Document {
+    /// The merged image Photoshop stored in the file, in sRGB, or `None` when there is none
+    /// (files saved without "Maximize compatibility").
+    pub fn stored_composite(&self) -> Option<Image> {
+        let n = self.width as usize * self.height as usize;
+        let colors = self.color_mode.channels().min(4);
+        if !self.real_composite || n == 0 || (0..colors).any(|c| self.composite.get(c).is_none_or(|p| p.len() < n)) {
+            return None;
+        }
+        let options = RenderOptions::default();
+        let fonts = FontDb::new();
+        let ctx = Ctx { doc: self, fonts: &fonts, options: &options, cs: ColorSpace::new(self) };
+        let mut cv = composite_image(&ctx);
+        ctx.cs.encode_linear(&mut cv.px);
+        let mut image = Image::from_premultiplied(self.width, self.height, &cv.px);
+        ctx.cs.finish(&mut image.data);
+        Some(image)
+    }
 }
 
 /// Flattens `doc` into an image, re-rendering type layers with `fonts`.
@@ -690,7 +725,57 @@ pub fn render(doc: &Document, fonts: &FontDb, options: &RenderOptions) -> Render
 
 /// Renders `doc`; without `finish` the image stays in the document's color space.
 pub(crate) fn render_inner(doc: &Document, fonts: &FontDb, options: &RenderOptions, finish: bool) -> Rendered {
-    let ctx = Ctx { doc, fonts, options, cs: ColorSpace::new(doc) };
+    let cs = ColorSpace::new(doc);
+    if doc.color_mode == crate::psd::ColorMode::Cmyk {
+        // Photoshop blends and adjusts CMYK per plate: composite the color plates and black
+        // separately, then convert the result.
+        let (cmy, k) = rayon::join(
+            || composite(doc, fonts, options, cs.with_plane(0)),
+            || composite(doc, fonts, options, cs.with_plane(1)),
+        );
+        let (cmy, warnings, text_masks) = cmy;
+        let image = merge_plates(&cs, doc.width, doc.height, &cmy.px, &k.0.px);
+        return Rendered { image, warnings, text_masks };
+    }
+    let (mut cv, warnings, text_masks) = composite(doc, fonts, options, cs.clone());
+    cs.encode_linear(&mut cv.px);
+    let mut image = Image::from_premultiplied(doc.width, doc.height, &cv.px);
+    if finish {
+        cs.finish(&mut image.data);
+    }
+    Rendered { image, warnings, text_masks }
+}
+
+/// Straight sRGB from the premultiplied cyan-magenta-yellow and black plate composites.
+fn merge_plates(cs: &ColorSpace, width: u32, height: u32, cmy: &[f32], k: &[f32]) -> Image {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let n = width as usize * height as usize;
+    let mut ink = vec![0u8; n * 4];
+    let mut alpha = vec![0u8; n];
+    for (i, (p, b)) in cmy.chunks_exact(4).zip(k.chunks_exact(4)).enumerate() {
+        let unmul = |p: &[f32], c: usize| if p[3] > 0.0 { p[c] / p[3] } else { 1.0 };
+        ink[i * 4..i * 4 + 4].copy_from_slice(
+            &[0, 1, 2].map(|c| 255 - q(unmul(p, c))).into_iter().chain([255 - q(unmul(b, 0))]).collect::<Vec<_>>(),
+        );
+        alpha[i] = q(p[3]);
+    }
+    let mut rgb = vec![0u8; n * 3];
+    ink.par_chunks(1 << 16).zip(rgb.par_chunks_mut(3 << 14)).for_each(|(i, o)| cs.cmyk_to_rgb(i, o));
+    let data = rgb
+        .chunks_exact(3)
+        .zip(&alpha)
+        .flat_map(|(c, &a)| if a > 0 { [c[0], c[1], c[2], a] } else { [0; 4] })
+        .collect();
+    Image { width, height, data }
+}
+
+fn composite(
+    doc: &Document,
+    fonts: &FontDb,
+    options: &RenderOptions,
+    cs: ColorSpace,
+) -> (Raster, Vec<Warning>, Vec<TextMask>) {
+    let ctx = Ctx { doc, fonts, options, cs };
     let (w, h) = (doc.width as usize, doc.height as usize);
     let mut warnings = vec![];
     if doc.color_mode == crate::psd::ColorMode::Duotone && doc.duotone.is_empty() {
@@ -718,11 +803,7 @@ pub(crate) fn render_inner(doc: &Document, fonts: &FontDb, options: &RenderOptio
         warnings.append(&mut c.warnings);
         comp.cv
     };
-    let mut image = Image::from_premultiplied(doc.width, doc.height, &cv.px);
-    if finish {
-        ctx.cs.finish(&mut image.data);
-    }
-    Rendered { image, warnings, text_masks }
+    (cv, warnings, text_masks)
 }
 
 #[cfg(test)]

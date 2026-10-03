@@ -3,6 +3,7 @@
 mod channel;
 pub(crate) mod descriptor;
 pub(crate) mod engine;
+mod features;
 pub(crate) mod reader;
 pub(crate) mod write;
 
@@ -134,6 +135,25 @@ pub struct Layer {
     pub(crate) blocks: HashMap<[u8; 4], Vec<u8>>,
     /// Changed since parsing; its pixels are re-rendered when the document is written.
     pub(crate) edited: bool,
+    /// Blend If ranges: composite gray, then each color channel.
+    pub(crate) blend_ranges: Vec<BlendRange>,
+    /// Whether any Blend If range hides something.
+    pub(crate) blend_if: bool,
+}
+
+/// One Blend If slider pair: `[black low, black high, white low, white high]` for this layer and
+/// for the underlying layers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BlendRange {
+    pub this: [u8; 4],
+    pub under: [u8; 4],
+}
+
+impl BlendRange {
+    pub fn is_full(&self) -> bool {
+        let full = |r: [u8; 4]| r[0] == 0 && r[1] == 0 && r[2] == 255 && r[3] == 255;
+        full(self.this) && full(self.under)
+    }
 }
 
 impl Layer {
@@ -188,6 +208,11 @@ pub struct Document {
     /// Layer records, bottom-to-top.
     pub layers: Vec<Layer>,
     pub(crate) channel_count: u16,
+    /// Whether the merged image's first alpha channel is its transparency.
+    pub(crate) merged_alpha: bool,
+    /// False when the file was saved without "Maximize compatibility" and the merged image is
+    /// a placeholder.
+    pub(crate) real_composite: bool,
     pub(crate) global_angle: f64,
     pub(crate) global_altitude: f64,
     pub(crate) palette: Vec<[u8; 3]>,
@@ -226,12 +251,12 @@ const LONG_KEYS: [&[u8; 4]; 14] = [
     b"PxSD", b"cinf",
 ];
 
-const LAYER_KEYS: [&[u8; 4]; 49] = [
+const LAYER_KEYS: [&[u8; 4]; 50] = [
     b"TySh", b"lfx2", b"lmfx", b"lsct", b"lsdk", b"iOpa", b"luni", b"vmsk", b"vsms", b"vstk", b"vscg", b"SoLd",
     b"SoLE", b"PlLd", b"knko", b"clbl", b"infx", b"tsly", b"lmgm", b"vmgm", b"brst", b"SoCo", b"GdFl", b"PtFl",
     b"levl", b"curv", b"brit", b"hue2", b"hue ", b"blnc", b"vibA", b"expA", b"selc", b"mixr", b"grdm", b"phfl",
     b"nvrt", b"post", b"thrs", b"CgEd", b"clrL", b"blwh", b"lclr", b"shmd", b"fxrp", b"lyvr", b"artb", b"artd",
-    b"abdd",
+    b"abdd", b"lfxs",
 ];
 const GLOBAL_KEYS: [&[u8; 4]; 10] =
     [b"Layr", b"Lr16", b"Lr32", b"Patt", b"Pat2", b"Pat3", b"lnk2", b"lnkD", b"lnk3", b"lnkE"];
@@ -358,7 +383,11 @@ fn read_record(r: &mut Reader) -> Result<Record> {
     let mask_len = r.u32()? as usize;
     let mask_info = r.bytes(mask_len)?.to_vec();
     let ranges = r.u32()? as usize;
-    r.skip(ranges)?;
+    let blend_ranges: Vec<BlendRange> = r
+        .bytes(ranges)?
+        .chunks_exact(8)
+        .map(|c| BlendRange { this: [c[0], c[1], c[2], c[3]], under: [c[4], c[5], c[6], c[7]] })
+        .collect();
     let name_len = r.u8()? as usize;
     let mut name: String = r.bytes(name_len)?.iter().map(|&c| c as char).collect();
     r.skip((4 - (1 + name_len) % 4) % 4)?;
@@ -401,15 +430,21 @@ fn read_record(r: &mut Reader) -> Result<Record> {
         channels: HashMap::new(),
         blocks: blocks.data.iter().map(|(k, v)| (*k, v.to_vec())).collect(),
         edited: false,
+        blend_if: blend_ranges.iter().any(|r| !r.is_full()),
+        blend_ranges,
     };
     Ok(Record { layer, channels, mask_info })
 }
 
-fn read_layer_info(r: &mut Reader, end: usize, depth: u16) -> Result<Vec<Layer>> {
+/// The layers, and whether the merged image's first alpha channel is its transparency (a
+/// negative layer count).
+fn read_layer_info(r: &mut Reader, end: usize, depth: u16) -> Result<(Vec<Layer>, bool)> {
     if r.pos + 2 > end {
-        return Ok(vec![]);
+        return Ok((vec![], false));
     }
-    let count = r.i16()?.unsigned_abs() as usize;
+    let count = r.i16()?;
+    let merged_alpha = count < 0;
+    let count = count.unsigned_abs() as usize;
     let mut records = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
         records.push(read_record(r)?);
@@ -467,7 +502,7 @@ fn read_layer_info(r: &mut Reader, end: usize, depth: u16) -> Result<Vec<Layer>>
         l.vector_feather = info.vector_feather;
         layers.push(rec.layer);
     }
-    Ok(layers)
+    Ok((layers, merged_alpha))
 }
 
 fn read_composite(
@@ -747,6 +782,8 @@ impl Document {
             color_mode: ColorMode::Rgb,
             layers: vec![],
             channel_count: 3,
+            merged_alpha: false,
+            real_composite: true,
             global_angle: 120.0,
             global_altitude: 30.0,
             palette: vec![],
@@ -915,6 +952,7 @@ impl Document {
         let mut transparent_index = None;
         let mut icc_profile = None;
         let mut duotone_preview = None;
+        let mut real_composite = true;
         while r.pos + 12 <= resources_end {
             if &r.tag()? != b"8BIM" {
                 break;
@@ -929,6 +967,7 @@ impl Document {
                 1049 if size >= 4 => global_altitude = Reader::new(body).i32()? as f64,
                 1039 => icc_profile = Some(body.to_vec()),
                 1066 => duotone_preview = Some(body),
+                1057 if size >= 5 => real_composite = body[4] != 0,
                 1047 if size >= 2 => transparent_index = Some(Reader::new(body).u16()?.min(255) as u8),
                 _ => {}
             }
@@ -941,6 +980,7 @@ impl Document {
         let layer_mask_len = r.length()?;
         let layer_mask_end = r.pos + layer_mask_len;
         let mut layers = vec![];
+        let mut merged_alpha = false;
         let mut patterns = HashMap::new();
         let mut linked = HashMap::new();
         let mut external = HashMap::new();
@@ -948,7 +988,7 @@ impl Document {
             let info_len = r.length()?;
             let info_end = r.pos + info_len;
             if info_len > 0 {
-                layers = read_layer_info(&mut r, info_end, depth)?;
+                (layers, merged_alpha) = read_layer_info(&mut r, info_end, depth)?;
             }
             r.pos = info_end;
             if r.pos + 4 <= layer_mask_end {
@@ -958,9 +998,10 @@ impl Document {
             let globals = Blocks::read(&mut r, layer_mask_end, true, &GLOBAL_KEYS)?;
             if layers.is_empty() {
                 if let Some(b) = [b"Layr", b"Lr16", b"Lr32"].iter().find_map(|k| globals.get(k)) {
-                    layers = read_layer_info(&mut Reader::at(b, 0, r.psb), b.len(), depth)?;
+                    (layers, merged_alpha) = read_layer_info(&mut Reader::at(b, 0, r.psb), b.len(), depth)?;
                 }
             }
+            merged_alpha |= globals.present.iter().any(|k| matches!(k, b"Mtrn" | b"Mt16" | b"Mt32"));
             for key in [b"Patt", b"Pat2", b"Pat3"] {
                 globals.all(*key).for_each(|b| read_patterns(b, &mut patterns));
             }
@@ -984,6 +1025,8 @@ impl Document {
             color_mode,
             layers,
             channel_count,
+            merged_alpha,
+            real_composite,
             global_angle,
             global_altitude,
             palette,

@@ -16,9 +16,11 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<Color
         return Err("unknown adjustment");
     };
     let r = &mut Reader::new(data);
+    // Adjustments that treat each channel alike, which CMYK plate passes can run directly.
+    let separable = matches!(&key, b"levl" | b"curv" | b"brit" | b"CgEd" | b"expA" | b"nvrt" | b"post" | b"thrs");
     let f = match &key {
-        b"levl" => levels(r),
-        b"curv" => curves(data),
+        b"levl" => levels(r, cs),
+        b"curv" => curves(data, cs),
         b"brit" | b"CgEd" => brightness_contrast(l),
         b"hue2" | b"hue " => hue_saturation(r),
         b"blnc" => color_balance(r),
@@ -30,7 +32,7 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<Color
         b"phfl" => photo_filter(r, cs),
         b"nvrt" => Some(Box::new(|c: [f32; 3]| c.map(|v| 1.0 - v)) as ColorFn),
         b"post" => posterize(r),
-        b"thrs" => threshold(r),
+        b"thrs" => threshold(r, cs),
         b"blwh" => black_white(data, cs),
         b"clrL" => {
             // Version and descriptor version, then the descriptor.
@@ -42,7 +44,15 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode) -> Result<Color
         }
         _ => None,
     };
-    f.ok_or("malformed adjustment")
+    let f = f.ok_or("malformed adjustment")?;
+    if cs.plane() != Some(1) || separable {
+        return Ok(f);
+    }
+    // The black pass holds black and the color's luminance: adjust both as grays.
+    Ok(Box::new(move |c: [f32; 3]| {
+        let l = lum(f([c[1]; 3]));
+        [f([c[0]; 3])[0], l, l]
+    }))
 }
 
 pub(crate) fn lut_fn(luts: [Option<Vec<f32>>; 4]) -> ColorFn {
@@ -66,13 +76,23 @@ pub(crate) fn lut_fn(luts: [Option<Vec<f32>>; 4]) -> ColorFn {
     })
 }
 
+/// The composite table and the tables of the channels this pass works on, from the composite and
+/// up to four per-channel tables.
+fn channel_luts(luts: [Option<Vec<f32>>; 5], cs: &ColorSpace) -> [Option<Vec<f32>>; 4] {
+    let [all, a, b, c, k] = luts;
+    match cs.plane() {
+        Some(1) => [all, k, None, None],
+        _ => [all, a, b, c],
+    }
+}
+
 pub(crate) fn table(f: impl Fn(f64) -> f64) -> Vec<f32> {
     (0..1024).map(|i| f(i as f64 / 1023.0).clamp(0.0, 1.0) as f32).collect()
 }
 
-fn levels(r: &mut Reader) -> Option<ColorFn> {
+fn levels(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     r.u16().ok()?;
-    let mut luts: [Option<Vec<f32>>; 4] = Default::default();
+    let mut luts: [Option<Vec<f32>>; 5] = Default::default();
     for lut in &mut luts {
         let v: Vec<f64> = (0..5).map(|_| r.u16().map(|x| x as f64)).collect::<Result<_, _>>().ok()?;
         let (ib, iw, ob, ow, g) =
@@ -83,7 +103,7 @@ fn levels(r: &mut Reader) -> Option<ColorFn> {
         let scale = if (iw - ib).abs() > 1e-9 { iw - ib } else { 1.0 };
         *lut = Some(table(|t| ((t - ib) / scale).clamp(0.0, 1.0).powf(1.0 / g) * (ow - ob) + ob));
     }
-    Some(lut_fn(luts))
+    Some(lut_fn(channel_luts(luts, cs)))
 }
 
 /// Natural cubic spline through `pts` (sorted by x), flat outside the end points.
@@ -135,12 +155,12 @@ fn curve_points(r: &mut Reader) -> Option<Vec<(f64, f64)>> {
     Some(pts)
 }
 
-fn curves(data: &[u8]) -> Option<ColorFn> {
+fn curves(data: &[u8], cs: &ColorSpace) -> Option<ColorFn> {
     let mut r = Reader::new(data);
     let is_map = r.u8().ok()? != 0;
     let version = r.u16().ok()?;
     let bits = r.u32().ok()?;
-    let mut luts: [Option<Vec<f32>>; 4] = Default::default();
+    let mut luts: [Option<Vec<f32>>; 5] = Default::default();
     let read_curve = |r: &mut Reader| -> Option<Vec<f32>> {
         if is_map {
             let m = r.bytes(256).ok()?;
@@ -169,7 +189,7 @@ fn curves(data: &[u8]) -> Option<ColorFn> {
             }
         }
     }
-    Some(lut_fn(luts))
+    Some(lut_fn(channel_luts(luts, cs)))
 }
 
 fn brightness_contrast(l: &Layer) -> Option<ColorFn> {
@@ -187,8 +207,9 @@ fn brightness_contrast(l: &Layer) -> Option<ColorFn> {
 /// Brightness and contrast in -150..=150 and -100..=100 (legacy: -100..=100 for both).
 pub(crate) fn brightness_contrast_fn(b: f64, c: f64, legacy: bool) -> ColorFn {
     if legacy {
-        let k = if c >= 0.0 { 100.0 / (100.0 - c).max(0.5) } else { (100.0 + c) / 100.0 };
-        let lut = table(|t| (t + b / 255.0 - 0.5) * k + 0.5);
+        // Raising contrast brightens first; lowering it brightens the flattened result.
+        let (k, b) = (if c >= 0.0 { 100.0 / (100.0 - c).max(0.5) } else { (100.0 + c) / 100.0 }, b / 255.0);
+        let lut = table(|t| if c >= 0.0 { (t + b - 0.5) * k + 0.5 } else { (t - 0.5) * k + 0.5 + b });
         return lut_fn([Some(lut), None, None, None]);
     }
     let bb = b / 150.0;
@@ -579,9 +600,15 @@ fn posterize(r: &mut Reader) -> Option<ColorFn> {
     Some(Box::new(move |c| c.map(|v| ((v * 255.0 / 256.0 * levels).floor() / (levels - 1.0)).min(1.0))))
 }
 
-fn threshold(r: &mut Reader) -> Option<ColorFn> {
+fn threshold(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     let level = (r.u16().ok()? as f32 - 1.0 / 255.0) * 255.0 / 256.0;
-    Some(Box::new(move |c| [if (lum(c) * 255.0).round() > level { 1.0 } else { 0.0 }; 3]))
+    let on = move |l: f32| if (l * 255.0).round() > level { 1.0 } else { 0.0 };
+    Some(match cs.plane() {
+        // CMYK: no color ink; black from the luminance carried by the black pass.
+        Some(0) => Box::new(|_| [1.0; 3]),
+        Some(_) => Box::new(move |c| [on(c[1]); 3]),
+        None => Box::new(move |c| [on(lum(c)); 3]),
+    })
 }
 
 fn black_white(data: &[u8], cs: &ColorSpace) -> Option<ColorFn> {
@@ -650,7 +677,7 @@ mod tests {
     fn simple_adjustments() {
         let p = posterize(&mut Reader::new(&[0, 2])).unwrap();
         assert_eq!(p([0.2, 0.6, 1.0]), [0.0, 1.0, 1.0]);
-        let t = threshold(&mut Reader::new(&[0, 128])).unwrap();
+        let t = threshold(&mut Reader::new(&[0, 128]), &ColorSpace::default()).unwrap();
         assert_eq!(t([0.6, 0.6, 0.6]), [1.0; 3]);
         assert_eq!(t([0.4, 0.4, 0.4]), [0.0; 3]);
     }

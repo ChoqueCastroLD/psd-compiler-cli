@@ -182,6 +182,86 @@ pub(crate) fn distances(a: &[f32], w: usize, h: usize, need_inward: bool, rmax: 
     Distances { inside, outside, inward }
 }
 
+/// Signed distance from each pixel center to the edge running through it, estimated from its
+/// coverage and the coverage gradient (Gustavson's anti-aliased distance): positive when the
+/// center lies outside the edge, within `-0.5..=0.5`; 0.5 for empty and -0.5 for full pixels.
+pub(crate) fn edge_offsets(a: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let at = |x: isize, y: isize| -> f32 {
+        if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+            0.0
+        } else {
+            a[y as usize * w + x as usize]
+        }
+    };
+    let s2 = std::f32::consts::SQRT_2;
+    (0..w * h)
+        .map(|i| {
+            let v = a[i].clamp(0.0, 1.0);
+            if v <= 0.0 {
+                return 0.5;
+            }
+            if v >= 1.0 {
+                return -0.5;
+            }
+            let (x, y) = ((i % w) as isize, (i / w) as isize);
+            let gx = at(x + 1, y - 1) + s2 * at(x + 1, y) + at(x + 1, y + 1)
+                - at(x - 1, y - 1)
+                - s2 * at(x - 1, y)
+                - at(x - 1, y + 1);
+            let gy = at(x - 1, y + 1) + s2 * at(x, y + 1) + at(x + 1, y + 1)
+                - at(x - 1, y - 1)
+                - s2 * at(x, y - 1)
+                - at(x + 1, y - 1);
+            if gx == 0.0 || gy == 0.0 {
+                return 0.5 - v;
+            }
+            let len = gx.hypot(gy);
+            let (mut gx, mut gy) = ((gx / len).abs(), (gy / len).abs());
+            if gx < gy {
+                std::mem::swap(&mut gx, &mut gy);
+            }
+            let a1 = 0.5 * gy / gx;
+            if v < a1 {
+                0.5 * (gx + gy) - (2.0 * gx * gy * v).sqrt()
+            } else if v < 1.0 - a1 {
+                (0.5 - v) * gx
+            } else {
+                -0.5 * (gx + gy) + (2.0 * gx * gy * (1.0 - v)).sqrt()
+            }
+        })
+        .collect()
+}
+
+/// Levels the per-pixel costs of [`soft_distance`] are rounded up to.
+const COST_LEVELS: usize = 16;
+
+/// Distance in pixels from every pixel center to the cheapest seed: the minimum over seeds `q` of
+/// `|p - q| + cost(q)`, with `cost` in `0..1` (`None` for pixels that are not seeds). Costs are
+/// rounded up to sixteenths. Exact up to `rmax` pixels; anything farther comes back as [`INF`].
+pub(crate) fn soft_distance(cost: impl Fn(usize) -> Option<f32> + Sync, w: usize, h: usize, rmax: f32) -> Vec<f32> {
+    let level: Vec<u8> = (0..w * h)
+        .map(|i| cost(i).map_or(u8::MAX, |c| (c.clamp(0.0, 1.0) * COST_LEVELS as f32).ceil() as u8))
+        .collect();
+    let mut present = [false; COST_LEVELS + 1];
+    for &l in &level {
+        if l != u8::MAX {
+            present[l as usize] = true;
+        }
+    }
+    let mut out = vec![INF; w * h];
+    for k in (0..=COST_LEVELS).filter(|&k| present[k]) {
+        let seed: Vec<bool> = level.iter().map(|&l| l != u8::MAX && l as usize <= k).collect();
+        let t = k as f32 / COST_LEVELS as f32;
+        let d = edt(&seed, w, h, rmax + 1.0);
+        for (o, &d2) in out.iter_mut().zip(&d) {
+            if d2 < INF {
+                *o = o.min(d2.sqrt() + t);
+            }
+        }
+    }
+    out
+}
+
 /// Blocked transpose of a `w x h` row-major buffer into `h x w`.
 pub(crate) fn transpose(src: &[f32], dst: &mut [f32], w: usize, h: usize) {
     const B: usize = 32;

@@ -18,10 +18,15 @@ pub(crate) struct ColorSpace {
     /// sRGB to CMYK ink, for writing CMYK documents.
     to_cmyk: Option<Arc<Transform8BitExecutor>>,
     output: Option<(Arc<Transform8BitExecutor>, bool)>,
-    /// Descriptor colors are linear light (32-bit documents).
+    /// 32-bit documents composite in linear light, as their pixels and descriptor colors are.
     linear: bool,
     /// Duotone appearance of each gray level, as sRGB.
     duotone: Option<Arc<Vec<[u8; 3]>>>,
+    /// CMYK documents composite in two passes, as stored (255 - ink) values: the cyan, magenta
+    /// and yellow plates (0), then black with the color's luminance in the other two channels
+    /// (1), for adjustments like Threshold that look at the whole color. `None` converts
+    /// CMYK to sRGB as it is decoded.
+    plane: Option<u8>,
 }
 
 fn options() -> TransformOptions {
@@ -73,6 +78,71 @@ impl ColorSpace {
         cs
     }
 
+    /// The same transforms working on one set of CMYK plates (see [`ColorSpace::plane`]).
+    pub fn with_plane(&self, plane: u8) -> ColorSpace {
+        ColorSpace { plane: Some(plane), ..self.clone() }
+    }
+
+    /// The CMYK plates this pass composites, if it works on plates.
+    pub fn plane(&self) -> Option<u8> {
+        self.plane
+    }
+
+    /// Working values on plate set `plane` of one CMYK color given as ink (0 = none).
+    ///
+    /// The luminance is that of the plain conversion `(1 - ink) * (1 - black)`, which is what
+    /// Photoshop's Threshold measures.
+    pub fn plates(plane: u8, ink: [u8; 4]) -> [f32; 3] {
+        let v = |c: usize| (255 - ink[c]) as f32 / 255.0;
+        if plane == 0 {
+            [v(0), v(1), v(2)]
+        } else {
+            let l = crate::blend::lum([v(0), v(1), v(2)]) * v(3);
+            [v(3), l, l]
+        }
+    }
+
+    /// Converts an sRGB color in 0..=1 to working values.
+    pub fn srgb_to_working(&self, rgb: [f32; 3]) -> [f32; 3] {
+        if self.linear {
+            return rgb.map(|v| srgb_decode(v as f64) as f32);
+        }
+        let Some(plane) = self.plane else { return rgb };
+        let rgb8 = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let mut ink = [0u8; 4];
+        self.rgb_to_cmyk(&rgb8, &mut ink);
+        Self::plates(plane, ink)
+    }
+
+    /// Encodes premultiplied linear-light pixels (32-bit documents) to sRGB in place.
+    pub fn encode_linear(&self, px: &mut [f32]) {
+        if !self.linear {
+            return;
+        }
+        for p in px.chunks_exact_mut(4) {
+            if p[3] > 0.0 {
+                for c in 0..3 {
+                    p[c] = srgb_encode((p[c] / p[3]) as f64) as f32 * p[3];
+                }
+            }
+        }
+    }
+
+    /// Converts straight sRGB RGBA8 pixels to working values in place (CMYK plates only; see
+    /// [`ColorSpace::srgb_to_working`] for linear light).
+    pub fn srgb_rgba8_to_working(&self, rgba: &mut [u8]) {
+        let Some(plane) = self.plane else { return };
+        let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        let mut ink = vec![0u8; rgb.len() / 3 * 4];
+        self.rgb_to_cmyk(&rgb, &mut ink);
+        for (p, k) in rgba.chunks_exact_mut(4).zip(ink.chunks_exact(4)) {
+            let v = Self::plates(plane, [k[0], k[1], k[2], k[3]]);
+            for c in 0..3 {
+                p[c] = (v[c] * 255.0).round() as u8;
+            }
+        }
+    }
+
     /// Whether the document works in linear light (32-bit).
     pub fn is_linear(&self) -> bool {
         self.linear
@@ -113,6 +183,9 @@ impl ColorSpace {
     /// One CMYK color with components in 0..=1 of ink.
     pub fn cmyk(&self, c: f64, m: f64, y: f64, k: f64) -> [f32; 3] {
         let ink = [c, m, y, k].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        if let Some(plane) = self.plane {
+            return Self::plates(plane, ink);
+        }
         let mut rgb = [0u8; 3];
         self.cmyk_to_rgb(&ink, &mut rgb);
         rgb.map(|v| v as f32 / 255.0)
@@ -291,11 +364,13 @@ pub(crate) fn from_object(c: &Descriptor, cs: &ColorSpace) -> Option<[f32; 3]> {
     } else if let (Some(cy), Some(m), Some(y), Some(k)) = (c.num("Cyn "), c.num("Mgnt"), c.num("Ylw "), c.num("Blck")) {
         return Some(cs.cmyk(cy / 100.0, m / 100.0, y / 100.0, k / 100.0));
     } else if let (Some(l), Some(a), Some(b)) = (c.num("Lmnc"), c.num("A   "), c.num("B   ")) {
-        return Some(lab_to_rgb(l, a, b));
+        return Some(cs.srgb_to_working(lab_to_rgb(l, a, b)));
     } else {
         return None;
     };
-    Some(rgb.map(|v| if cs.linear { srgb_encode(v) } else { v.clamp(0.0, 1.0) } as f32))
+    let rgb = rgb.map(|v| v.clamp(0.0, 1.0) as f32);
+    // 32-bit documents give linear-light values already.
+    Some(if cs.linear { rgb } else { cs.srgb_to_working(rgb) })
 }
 
 /// The color stored under `key` (usually `Clr `), black when absent.

@@ -53,6 +53,12 @@ pub(crate) fn decode_row(
                 *p = [0, 1, 2].map(|c| get(ch[c], i, 0) as f32 / 255.0);
             }
         }
+        ColorMode::Cmyk if cs.plane().is_some() => {
+            let plane = cs.plane().unwrap_or(0);
+            for (i, p) in rgb.iter_mut().enumerate() {
+                *p = ColorSpace::plates(plane, [0, 1, 2, 3].map(|c| 255 - get(ch[c], i, 255)));
+            }
+        }
         ColorMode::Cmyk => {
             let ink: Vec<u8> = (0..n).flat_map(|i| [0, 1, 2, 3].map(|c| 255 - get(ch[c], i, 255))).collect();
             let mut out8 = vec![0u8; n * 3];
@@ -78,6 +84,11 @@ pub(crate) fn decode_row(
             for (i, p) in rgb.iter_mut().enumerate() {
                 *p = [get(ch[0], i, 0) as f32 / 255.0; 3];
             }
+        }
+    }
+    if cs.is_linear() {
+        for p in &mut rgb {
+            *p = cs.srgb_to_working(*p);
         }
     }
     for (i, (p, c)) in out.chunks_exact_mut(4).zip(&rgb).enumerate() {
@@ -148,22 +159,31 @@ fn shape_raster(doc: &Document, cs: &ColorSpace, l: &Layer, bake: bool) -> Optio
         return None;
     }
     let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    let bounds = path_box.unwrap_or(if l.bounds.width() > 0 {
-        [l.bounds.left as f64, l.bounds.top as f64, l.bounds.right as f64, l.bounds.bottom as f64]
-    } else {
-        [0.0, 0.0, doc.width as f64, doc.height as f64]
-    });
+    // Aligned gradients and patterns span the visible area: the vector path, else a raster mask
+    // that hides everything outside it, else the layer.
+    let rect_box = |r: &crate::psd::Rect| [r.left as f64, r.top as f64, r.right as f64, r.bottom as f64];
+    let mask_box = l
+        .mask
+        .as_ref()
+        .filter(|m| !m.disabled && m.default == 0 && m.rect.width() > 0 && m.rect.height() > 0)
+        .map(|m| rect_box(&m.rect));
+    let bounds =
+        vm.as_ref().filter(|m| !m.invert).and_then(|m| m.bounds()).or(mask_box).unwrap_or(if l.bounds.width() > 0 {
+            rect_box(&l.bounds)
+        } else {
+            [0.0, 0.0, doc.width as f64, doc.height as f64]
+        });
     let fill_on = stroke.as_ref().is_none_or(|s| s.fill_enabled);
     let cov = match (&vm, fill_on) {
         (_, false) => Some(vec![0.0; w * h]),
         (Some(m), true) if bake => Some(m.rasterize(x0, y0, w, h)),
         _ => None,
     };
-    let mut r = fill.render(doc, x0, y0, w, h, cov.as_deref(), bounds);
+    let mut r = fill.render(doc, cs, x0, y0, w, h, cov.as_deref(), bounds);
     if let (Some(s), Some(m)) = (&stroke, &vm) {
         let line = s.rasterize(m, x0, y0, w, h);
         let paint = s.content.as_ref().map_or(Fill::Solid([0.0; 3]), |d| Fill::parse(d, cs));
-        let sr = paint.render(doc, x0, y0, w, h, Some(&line), bounds);
+        let sr = paint.render(doc, cs, x0, y0, w, h, Some(&line), bounds);
         r.paint(&sr, crate::blend::BlendMode::Normal, s.opacity, None);
     }
     Some(r)
@@ -173,6 +193,7 @@ fn shape_raster(doc: &Document, cs: &ColorSpace, l: &Layer, bake: bool) -> Optio
 /// be read, so the cached pixels stand in.
 pub(crate) fn text_raster(
     doc: &Document,
+    cs: &ColorSpace,
     l: &Layer,
     fonts: &crate::fonts::FontDb,
     pad: usize,
@@ -186,11 +207,12 @@ pub(crate) fn text_raster(
             return Err(());
         }
     };
-    Ok(draw_text(doc, &tl, fonts, pad, warnings))
+    Ok(draw_text(doc, cs, &tl, fonts, pad, warnings))
 }
 
 fn draw_text(
     doc: &Document,
+    cs: &ColorSpace,
     tl: &TextLayer,
     fonts: &crate::fonts::FontDb,
     pad: usize,
@@ -211,7 +233,10 @@ fn draw_text(
         .map(|g| {
             (
                 path::map(&g.path, |x, y| (t[0] * x + t[2] * y + t[4], t[1] * x + t[3] * y + t[5])),
-                g.color,
+                {
+                    let c = cs.srgb_to_working([g.color[0], g.color[1], g.color[2]]);
+                    [c[0], c[1], c[2], g.color[3]]
+                },
                 g.bold * scale,
             )
         })
@@ -301,6 +326,7 @@ fn draw_text(
 pub(crate) fn layer_effects(doc: &Document, cs: &ColorSpace, l: &Layer) -> Effects {
     l.block(b"lmfx")
         .or(l.block(b"lfx2"))
+        .or(l.block(b"lfxs"))
         .and_then(|b| descriptor::parse_block(b, 8).ok())
         .map(|d| effects::parse(&d, doc, cs))
         .unwrap_or_default()
@@ -349,7 +375,7 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
     let mut baked_vector = false;
     let soft_vector = l.vector_density < 1.0 || l.vector_feather > 0.0;
     let content = if is_text {
-        text_raster(doc, l, ctx.fonts, pad, &mut out.warnings)
+        text_raster(doc, cs, l, ctx.fonts, pad, &mut out.warnings)
             .unwrap_or_else(|()| pixel_raster(doc, cs, l).map(|r| r.padded(pad)))
     } else if l.kind == LayerKind::SmartObject {
         super::smart::render(ctx, l, pad, &mut out.warnings).or_else(|| pixel_raster(doc, cs, l)).map(|r| r.padded(pad))
@@ -380,7 +406,7 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
         let fill = l.fill_opacity as f32 / 255.0;
         let rect = (content.x, content.y, content.w, content.h);
         let path = (!out.effects.strokes.is_empty()).then(|| path_coverage(doc, l, &content, &out.mask)).flatten();
-        out.prepared = out.effects.prepare(doc, &out.coverage, path.as_deref(), rect, fill, bounds);
+        out.prepared = out.effects.prepare(doc, cs, &out.coverage, path.as_deref(), rect, fill, bounds);
     }
     out.text_mask = (is_text && ctx.options.text_masks).then(|| TextMask {
         layer: index,
