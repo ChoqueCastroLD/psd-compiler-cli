@@ -28,7 +28,10 @@ pub(crate) fn parse(l: &Layer, cs: &ColorSpace, mode: ColorMode, depth: u16) -> 
         b"vibA" => vibrance(data),
         b"expA" => exposure(r, if mode == ColorMode::Grayscale { 1.75 } else { 2.2 }),
         b"selc" => selective_color(r),
-        b"mixr" => channel_mixer(r),
+        b"mixr" => {
+            let f = channel_mixer(r, cs).ok_or("malformed adjustment")?;
+            return Ok(f);
+        }
         b"grdm" => gradient_map(r, cs),
         b"phfl" => photo_filter(r, cs),
         b"nvrt" => Some(Box::new(|c: [f32; 3]| c.map(|v| 1.0 - v)) as ColorFn),
@@ -496,7 +499,7 @@ fn selective_color(r: &mut Reader) -> Option<ColorFn> {
     }))
 }
 
-fn channel_mixer(r: &mut Reader) -> Option<ColorFn> {
+fn channel_mixer(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
     r.u16().ok()?;
     let mono = r.u16().ok()? != 0;
     let mut rows = [[0f32; 5]; 4];
@@ -507,6 +510,22 @@ fn channel_mixer(r: &mut Reader) -> Option<ColorFn> {
                 Err(_) => 0.0,
             };
         }
+    }
+    // CMYK mixes ink, one plate pass at a time: the color plates from each other, black from itself.
+    match cs.plane() {
+        Some(0) => {
+            return Some(Box::new(move |c| {
+                let ink = c.map(|v| 1.0 - v);
+                let mix = |row: &[f32; 5]| 1.0 - (row[0] * ink[0] + row[1] * ink[1] + row[2] * ink[2] + row[4]);
+                let rows = if mono { [rows[0]; 3] } else { [rows[0], rows[1], rows[2]] };
+                rows.map(|row| mix(&row))
+            }))
+        }
+        Some(_) => {
+            let row = if mono { rows[0] } else { rows[3] };
+            return Some(Box::new(move |c| [1.0 - (row[3] * (1.0 - c[0]) + row[4]), c[1], c[2]]));
+        }
+        None => {}
     }
     Some(Box::new(move |c| {
         let mix = |row: &[f32; 5]| row[0] * c[0] + row[1] * c[1] + row[2] * c[2] + row[4];

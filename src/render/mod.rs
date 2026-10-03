@@ -976,8 +976,35 @@ fn composite_image(ctx: &Ctx) -> Raster {
     let colors = doc.color_mode.channels().min(4);
     let alpha = if doc.merged_alpha || doc.layers.is_empty() { ch(colors) } else { None };
     let channels = [0, 1, 2, 3].map(|c| if c < colors { ch(c) } else { None });
+    let cmyk = doc.color_mode == crate::psd::ColorMode::Cmyk;
     r.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
         let s = |c| layer::row(c, y, w);
+        if let (true, Some(a)) = (cmyk, s(alpha)) {
+            // CMYK is matted in ink: divide the inks (stored inverted) by the alpha.
+            let inks = channels.map(|c| {
+                s(c).map(|v| {
+                    v.iter()
+                        .zip(a)
+                        .map(
+                            |(&v, &a)| {
+                                if a == 0 {
+                                    255
+                                } else {
+                                    255 - ((255 - v as u32) * 255 / a as u32).min(255) as u8
+                                }
+                            },
+                        )
+                        .collect::<Vec<u8>>()
+                })
+            });
+            layer::decode_row(doc, &ctx.cs, inks.each_ref().map(|c| c.as_deref()), None, w, row);
+            for (p, &a) in row.chunks_exact_mut(4).zip(a) {
+                let a = a as f32 / 255.0;
+                p.iter_mut().take(3).for_each(|c| *c *= a);
+                p[3] = a;
+            }
+            return;
+        }
         layer::decode_row(doc, &ctx.cs, channels.map(s), None, w, row);
         // Photoshop mattes the merged image onto white; take the white back out.
         if let Some(a) = s(alpha) {

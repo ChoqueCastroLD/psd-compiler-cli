@@ -13,7 +13,7 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
-single color (118 of the 712, e.g. an adjustment over an empty canvas) count toward the total but not
+single color (118 of the 710, e.g. an adjustment over an empty canvas) count toward the total but not
 toward the feature rates, since they cannot show whether a feature renders right.
 
 Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
@@ -28,7 +28,9 @@ CI runs it on the test files of [psd-tools](https://github.com/psd-tools/psd-too
 [psd.js](https://github.com/meltingice/psd.js), [Krita](https://invent.kde.org/graphics/krita) (its PSD import tests) and
 [Aspose.PSD for .NET](https://github.com/aspose-psd/Aspose.PSD-for-.NET) (its example files), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
 carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files or the Aspose
-examples written back by Aspose (names with Changed, Added, Edited, Merged, Flattened or `_out`). None of the
+examples written back by Aspose (names with Changed, Added, Edited, Merged, Flattened or `_out`,
+plus `CropTest.psd`, whose composite carries Aspose's evaluation watermark, and
+`ImageWithTextLayer.psd`, whose text layer Aspose wrote). None of the
 files are committed here.
 
 ## Results
@@ -40,8 +42,8 @@ files are committed here.
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
 | PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
 | Krita `plugins/impex/psd/tests/data` | 20 / 20 |
-| Aspose.PSD `Examples/Data/PSD` | 188 / 201 (93.5%) |
-| All | 690 / 712 (96.9%) |
+| Aspose.PSD `Examples/Data/PSD` | 191 / 199 (96.0%) |
+| All | 693 / 710 (97.6%) |
 
 ### Misses
 
@@ -57,12 +59,9 @@ files are committed here.
 | Aspose `artboard2.psd` | Dissolve groups, as above. |
 | Aspose `StrokeNoise.psd` | A noise gradient, as above. |
 | Aspose `HasFont.psd`, `asposeImage02.psd`, `White 3D Text Effect.psd` | Fonts that are not installed (Stencil, Tw Cen MT). |
-| Aspose `CropTest.psd` | Its composite carries Aspose's evaluation watermark: Aspose wrote it. |
 | Aspose `ColorBalance.psd` | Its composite predates the last edit (it shows none of the layer's balance). |
 | Aspose `PhotoFilterAdjustmentLayer.psd` | A Photo Filter with a Lab color (88, −79, −118) far outside RGB; no conversion we tried explains Photoshop's result. |
 | Aspose `Mixer_ipad_Hand_W_crash.psd` | Color Balance with shadows, midtones and highlights set and luminosity preserved (mean 4.2): only midtones are calibrated. |
-| Aspose `ChannelMixerAdjustmentLayerCmyk.psd`, `CmykWithAlpha.psd`, `cub16bit_cmyk.psd` | CMYK documents: the channel mixer in CMYK, and alpha channels and 16-bit CMYK composites off by a few levels. |
-| Aspose `ImageWithTextLayer.psd` | Text antialiasing: mean 0.35, but 1.2% of pixels off by more than 16. |
 
 ## Calibrated models
 
@@ -116,6 +115,10 @@ Measured against the stored composites:
   [pkh.me's reverse engineering](https://blog.pkh.me/p/22-understanding-selective-coloring-in-adobe-photoshop.html)).
 - **Outer glows** never show through a faded fill: under the layer only the part outside the shape
   remains, whatever the fill opacity (Aspose's FillOpacitySample).
+- **Channel Mixer** in CMYK mixes ink, not the stored (inverted) values; each plate mixes the
+  color plates or black from itself.
+- **CMYK merged images with transparency** are matted onto white in ink (ink × alpha), so the
+  reference test divides the inks by alpha before converting.
 - **Color Lookup** CUBE tables name their loops outer to inner: `bgrOrder` runs red fastest,
   `rgbOrder` blue fastest.
 - **Patterns** shrunk below their size average the texels each pixel covers rather than sample one.
