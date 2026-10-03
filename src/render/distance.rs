@@ -276,13 +276,13 @@ pub(crate) fn transpose(src: &[f32], dst: &mut [f32], w: usize, h: usize) {
     }
 }
 
-/// Separable Gaussian blur with standard deviation `sigma`, truncated at `max_radius` pixels.
+/// Separable Gaussian blur with standard deviation `sigma`, its taps closer than `max_radius` pixels.
 /// Pixels outside the buffer count as zero.
 pub(crate) fn blur(a: &mut [f32], w: usize, h: usize, sigma: f64, max_radius: f64) {
     if sigma < 0.2 {
         return;
     }
-    let r = (sigma * 3.0).min(max_radius).ceil().max(1.0) as isize;
+    let r = (sigma * 3.0).ceil().min((max_radius - 1e-6).floor()).max(1.0) as isize;
     let mut kernel: Vec<f32> = (-r..=r).map(|i| (-(i * i) as f64 / (2.0 * sigma * sigma)).exp() as f32).collect();
     let sum: f32 = kernel.iter().sum();
     kernel.iter_mut().for_each(|v| *v /= sum);
@@ -407,7 +407,13 @@ mod tests {
         let (w, h) = (21, 1);
         let mut a = vec![0f32; w];
         a[10] = 1.0;
+        // Taps stop short of the radius, like Photoshop's (effects/blend-modes).
         blur(&mut a, w, h, 3.0, 2.0);
+        assert_eq!(a[8], 0.0);
+        assert!(a[9] > 0.0);
+        a.fill(0.0);
+        a[10] = 1.0;
+        blur(&mut a, w, h, 3.0, 2.5);
         assert_eq!(a[7], 0.0);
         assert!(a[8] > 0.0);
     }

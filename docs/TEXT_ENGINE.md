@@ -74,7 +74,7 @@ Effects run on a **4× supersampled** inside/outside grid derived from anti-alia
 | Effect | Model |
 |---|---|
 | Stroke | Outside: distance to shape ≤ size. Inside: distance to complement ≤ size. Center: ±size/2. |
-| Drop shadow | Offset by distance at angle (global or local). The shape grows by `spread · size`, then a Gaussian blur with **σ = 0.45 · (size − spread)**, truncated at `size − spread`. |
+| Drop shadow | Offset by distance at angle (global or local). The shape grows by `spread · size`, then a Gaussian blur with **σ = 0.45 · (size − spread)**, its taps closer than `size − spread`. |
 | Outer glow | Same blur model around the shape with no offset. |
 | Color overlay | Replaces the layer color, using the effect's blend mode and opacity. |
 
