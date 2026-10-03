@@ -560,7 +560,7 @@ impl Compositor<'_> {
             } else {
                 alpha_bounds(c)
             };
-            s.prepared = s.effects.prepare(self.ctx.doc, &self.ctx.cs, &s.coverage, None, rect, f, bounds);
+            s.prepared = s.effects.prepare(self.ctx.doc, &self.ctx.cs, &s.coverage, None, rect, f, (bounds, bounds));
         }
         for e in &s.prepared.below {
             comp.paint(&e.raster(c.x, c.y, c.w, c.h, o, None), None, e.mode, 0);

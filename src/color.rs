@@ -27,6 +27,8 @@ pub(crate) struct ColorSpace {
     /// (1), for adjustments like Threshold that look at the whole color. `None` converts
     /// CMYK to sRGB as it is decoded.
     plane: Option<u8>,
+    /// Lab documents interpolate gradients in Lab.
+    lab: bool,
 }
 
 fn options() -> TransformOptions {
@@ -41,7 +43,8 @@ fn is_identity(t: &Transform8BitExecutor) -> bool {
 
 impl ColorSpace {
     pub fn new(doc: &Document) -> ColorSpace {
-        let mut cs = ColorSpace { linear: doc.depth == 32, ..ColorSpace::default() };
+        let mut cs =
+            ColorSpace { linear: doc.depth == 32, lab: doc.color_mode == ColorMode::Lab, ..ColorSpace::default() };
         if doc.color_mode == ColorMode::Duotone && !doc.duotone.is_empty() {
             // The ink table already gives the final colors.
             cs.duotone = Some(Arc::new(doc.duotone.clone()));
@@ -141,6 +144,11 @@ impl ColorSpace {
                 p[c] = (v[c] * 255.0).round() as u8;
             }
         }
+    }
+
+    /// Whether the document is in Lab mode.
+    pub fn is_lab(&self) -> bool {
+        self.lab
     }
 
     /// Whether the document works in linear light (32-bit).

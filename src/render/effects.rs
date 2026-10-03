@@ -457,7 +457,7 @@ impl Effects {
         path: Option<&[f32]>,
         rect: (i32, i32, usize, usize),
         fill: f32,
-        bounds: [f64; 4],
+        (bounds, stroke_box): ([f64; 4], [f64; 4]),
     ) -> Prepared {
         let (x, y, w, h) = rect;
         let mut p = Prepared::default();
@@ -486,7 +486,7 @@ impl Effects {
             m.iter_mut().for_each(|v| *v = (*v + outside).clamp(0.0, 1.0));
             m
         };
-        let fill_tint = |f: &Fill| match f {
+        let fill_tint_in = |f: &Fill, bounds: [f64; 4]| match f {
             Fill::Solid(c) => Tint::Solid(*c),
             _ => {
                 let r = f.render(doc, cs, x, y, w, h, None, bounds);
@@ -497,6 +497,7 @@ impl Effects {
                 )
             }
         };
+        let fill_tint = |f: &Fill| fill_tint_in(f, bounds);
         let glow_tint = |g: &Glow, m: &mut Vec<f32>| match &g.gradient {
             None => Tint::Solid(g.color),
             Some(grad) => {
@@ -589,7 +590,10 @@ impl Effects {
             let band = |d: &Option<Vec<f32>>, r: f32| -> Vec<f32> {
                 d.as_ref().map_or(vec![0.0; w * h], |d| d.iter().map(|&d| (r + 1.0 - d).clamp(0.0, 1.0)).collect())
             };
-            let tint = fill_tint(&s.fill);
+            // Stroke gradients span the stroke's outer edge.
+            let o = outer_r as f64;
+            let b = stroke_box;
+            let tint = fill_tint_in(&s.fill, [b[0] - o, b[1] - o, b[2] + o, b[3] + o]);
             if inner_r > 0.0 {
                 let band = band(&inward, inner_r);
                 // On shapes the stroke follows the path, also where the fill is transparent.
@@ -839,12 +843,28 @@ mod tests {
         };
         let area = |v: &[f32]| v.iter().sum::<f32>();
         let e = Effects { strokes: vec![stroke(2.0, StrokePosition::Outside)], ..Default::default() };
-        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
+        let p = e.prepare(
+            &doc(),
+            &ColorSpace::default(),
+            &a,
+            None,
+            (0, 0, w, h),
+            1.0,
+            ([8.0, 8.0, 13.0, 13.0], [8.0, 8.0, 13.0, 13.0]),
+        );
         assert!(p.inner.is_empty());
         let outside = area(&p.beside[0].cov);
         assert!(outside > 4.0 * 5.0 * 2.0 && outside < 81.0 - 25.0, "{outside}");
         let e = Effects { strokes: vec![stroke(1.0, StrokePosition::Inside)], ..Default::default() };
-        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [8.0, 8.0, 13.0, 13.0]);
+        let p = e.prepare(
+            &doc(),
+            &ColorSpace::default(),
+            &a,
+            None,
+            (0, 0, w, h),
+            1.0,
+            ([8.0, 8.0, 13.0, 13.0], [8.0, 8.0, 13.0, 13.0]),
+        );
         assert!(p.beside.is_empty());
         assert!((area(&p.inner[0].cov) - 16.0).abs() < 1.0);
     }
@@ -865,7 +885,7 @@ mod tests {
             contour: None,
         };
         let e = Effects { inner_shadows: vec![s], ..Default::default() };
-        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
         let cov = &p.inner[0].cov;
         assert_eq!(cov[12 * w + 7], 0.0);
         assert_eq!(cov[12 * w + 16], 1.0);
@@ -889,7 +909,7 @@ mod tests {
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
         };
         let e = Effects { bevels: vec![b], ..Default::default() };
-        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, [0.0; 4]);
+        let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
         let (lo, hi) = (&p.inner[0].cov, &p.inner[1].cov);
         assert!(hi[15 * w + 6] > 0.3 && lo[15 * w + 6] == 0.0);
         assert!(lo[15 * w + 23] > 0.3 && hi[15 * w + 23] == 0.0);

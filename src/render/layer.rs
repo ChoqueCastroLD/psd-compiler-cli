@@ -409,7 +409,14 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
     out.coverage = coverage(&content, &out.mask);
     if !out.effects.is_empty() {
         let b = &l.bounds;
-        let bounds = if b.width() > 0 {
+        let path_box = l
+            .block(b"vmsk")
+            .or(l.block(b"vsms"))
+            .and_then(|b| vector::parse(b, doc.width, doc.height))
+            .filter(|m| !m.disabled && !m.invert)
+            .and_then(|m| m.bounds());
+        // Aligned gradients and patterns span a shape's path, else the layer's pixels.
+        let pixel_box = if b.width() > 0 {
             [b.left as f64, b.top as f64, b.right as f64, b.bottom as f64]
         } else {
             let pad = pad as f64;
@@ -420,6 +427,8 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
                 (content.y + content.h as i32) as f64 - pad,
             ]
         };
+        // Strokes lay theirs out on the layer's pixels.
+        let bounds = (path_box.unwrap_or(pixel_box), pixel_box);
         let fill = l.fill_opacity as f32 / 255.0;
         let rect = (content.x, content.y, content.w, content.h);
         let path = (!out.effects.strokes.is_empty()).then(|| path_coverage(doc, l, &content, &out.mask)).flatten();

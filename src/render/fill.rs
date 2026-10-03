@@ -29,6 +29,8 @@ pub(crate) struct Gradient {
     colors: Vec<Stop<[f32; 3]>>,
     alphas: Vec<Stop<f32>>,
     smooth: f64,
+    /// Colors hold Lab (L, a, b scaled to 0..=1), for Lab documents.
+    lab: bool,
 }
 
 fn stops<T: Clone>(list: Option<&[Value]>, value: impl Fn(&Descriptor) -> T) -> Vec<Stop<T>> {
@@ -48,19 +50,28 @@ fn stops<T: Clone>(list: Option<&[Value]>, value: impl Fn(&Descriptor) -> T) -> 
     out
 }
 
-fn smoothstep(t: f64) -> f64 {
-    t * t * (3.0 - 2.0 * t)
-}
-
 impl Gradient {
     /// Reads a `Grdn` descriptor. Noise gradients become a ramp through their limits.
     pub fn parse(g: &Descriptor, cs: &ColorSpace) -> Gradient {
         if g.enumerated("GrdF") == Some("ClNs") {
             return Gradient::noise(g);
         }
-        let mut colors = stops(g.list("Clrs"), |d| match d.enumerated("Type") {
-            Some("BckC") => [1.0; 3],
-            _ => color::from_key(d, "Clr ", cs),
+        let lab = cs.is_lab();
+        let mut colors = stops(g.list("Clrs"), |d| {
+            let rgb = match d.enumerated("Type") {
+                Some("BckC") => [1.0; 3],
+                _ => color::from_key(d, "Clr ", cs),
+            };
+            if !lab {
+                return rgb;
+            }
+            // Lab stops keep their out-of-gamut values.
+            let c = d.desc("Clr ");
+            let [l, a, b] = match c.and_then(|c| Some([c.num("Lmnc")?, c.num("A   ")?, c.num("B   ")?])) {
+                Some(v) => v,
+                None => color::rgb_to_lab(rgb.map(|v| v as f64)),
+            };
+            [l / 100.0, (a + 128.0) / 255.0, (b + 128.0) / 255.0].map(|v| v as f32)
         });
         if colors.is_empty() {
             colors = vec![Stop { at: 0.0, mid: 0.5, value: [0.0; 3] }, Stop { at: 1.0, mid: 0.5, value: [1.0; 3] }];
@@ -70,7 +81,7 @@ impl Gradient {
             alphas = vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }];
         }
         let smooth = (g.num("Intr").unwrap_or(4096.0) / 4096.0).clamp(0.0, 1.0);
-        Gradient { colors, alphas, smooth }
+        Gradient { colors, alphas, smooth, lab }
     }
 
     /// Builds a gradient from `(location, midpoint, value)` stops, all in 0..=1.
@@ -84,7 +95,12 @@ impl Gradient {
             }
             s
         }
-        Gradient { colors: build(colors, [0.0; 3]), alphas: build(alphas, 1.0), smooth: smooth.clamp(0.0, 1.0) }
+        Gradient {
+            colors: build(colors, [0.0; 3]),
+            alphas: build(alphas, 1.0),
+            smooth: smooth.clamp(0.0, 1.0),
+            lab: false,
+        }
     }
 
     fn noise(g: &Descriptor) -> Gradient {
@@ -113,40 +129,81 @@ impl Gradient {
             colors: vec![Stop { at: 0.0, mid: 0.5, value: pick(&lo) }, Stop { at: 1.0, mid: 0.5, value: pick(&hi) }],
             alphas: vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }],
             smooth: 0.0,
+            lab: false,
         }
     }
 
-    fn ramp<T: Copy>(&self, s: &[Stop<T>], t: f64, mix: impl Fn(T, T, f32) -> T) -> T {
+    /// Channel `ch` of ramp `s` at `t`. Smooth ramps are cubic Hermite curves: end stops at 0 or
+    /// 1 lean half their segment's slope, end stops before a flat run are flat, and inner stops
+    /// take the slope between their neighbors; no curve leaves its segment's range.
+    fn ramp<T>(&self, s: &[Stop<T>], t: f64, ch: impl Fn(&T) -> f32) -> f32 {
         let first = &s[0];
         if t <= first.at || s.len() == 1 {
-            return first.value;
+            return ch(&first.value);
         }
-        for w in s.windows(2) {
-            let (a, b) = (&w[0], &w[1]);
+        let v = |i: usize| ch(&s[i].value) as f64;
+        let slope = |i: usize| {
+            let span = s[i + 1].at - s[i].at;
+            if span > 0.0 {
+                (v(i + 1) - v(i)) / span
+            } else {
+                0.0
+            }
+        };
+        let last = s.len() - 1;
+        let tangent = |i: usize| -> f64 {
+            if i == 0 {
+                return if s[0].at <= 1e-6 { 0.5 * slope(0) } else { 0.0 };
+            }
+            if i == last {
+                return if s[last].at >= 1.0 - 1e-6 { 0.5 * slope(last - 1) } else { 0.0 };
+            }
+            let span = s[i + 1].at - s[i - 1].at;
+            if span > 0.0 {
+                (v(i + 1) - v(i - 1)) / span
+            } else {
+                0.0
+            }
+        };
+        for i in 0..last {
+            let (a, b) = (&s[i], &s[i + 1]);
             if t <= b.at {
                 let span = b.at - a.at;
                 if span <= 0.0 {
-                    return b.value;
+                    return ch(&b.value);
                 }
                 let u = (t - a.at) / span;
                 let u = if u < a.mid { 0.5 * u / a.mid } else { 0.5 + 0.5 * (u - a.mid) / (1.0 - a.mid) };
-                // Photoshop's smoothness bends the ramp about 78% of the way to a smoothstep.
-                let u = u + (smoothstep(u) - u) * self.smooth * 0.78;
-                return mix(a.value, b.value, u as f32);
+                let (va, vb) = (v(i), v(i + 1));
+                let linear = va + (vb - va) * u;
+                if self.smooth <= 0.0 {
+                    return linear as f32;
+                }
+                let (u2, u3) = (u * u, u * u * u);
+                let hermite = (2.0 * u3 - 3.0 * u2 + 1.0) * va
+                    + (u3 - 2.0 * u2 + u) * tangent(i) * span
+                    + (3.0 * u2 - 2.0 * u3) * vb
+                    + (u3 - u2) * tangent(i + 1) * span;
+                return (linear + (hermite - linear) * self.smooth).clamp(va.min(vb), va.max(vb)) as f32;
             }
         }
-        s[s.len() - 1].value
+        ch(&s[last].value)
     }
 
     fn color(&self, t: f64) -> [f32; 3] {
-        self.ramp(&self.colors, t, |a, b, u| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * u))
+        let c = [0, 1, 2].map(|i| self.ramp(&self.colors, t, |c| c[i]));
+        if self.lab {
+            let [l, a, b] = c.map(|v| v as f64);
+            return color::lab_to_rgb(l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0);
+        }
+        c
     }
 
     /// Straight RGBA at position `t` in 0..=1.
     pub fn sample(&self, t: f64) -> [f32; 4] {
         let t = t.clamp(0.0, 1.0);
         let c = self.color(t);
-        let a = self.ramp(&self.alphas, t, |a, b, u| a + (b - a) * u);
+        let a = self.ramp(&self.alphas, t, |a| *a);
         [c[0], c[1], c[2], a]
     }
 
@@ -202,18 +259,21 @@ impl GradientFill {
         let (cos, sin) = (th.cos(), th.sin());
         let half = ((bw * cos).abs() + (bh * sin).abs()).max(1.0) * self.scale / 2.0;
         // Photoshop snaps the end points to whole pixels, which matters for small boxes.
+        // (Rounding errors in the angle must not drop a whole pixel.)
+        let snap = |v: f64| (v + 1e-6).floor();
         let (sx, sy) = match self.style {
-            Style::Linear => ((cx - cos * half).floor(), (cy + sin * half).floor()),
-            _ => (cx.floor(), cy.floor()),
+            Style::Linear => (snap(cx - cos * half), snap(cy + sin * half)),
+            _ => (snap(cx), snap(cy)),
         };
-        let (ex, ey) = ((cx + cos * half).floor(), (cy - sin * half).floor());
+        let (ex, ey) = (snap(cx + cos * half), snap(cy - sin * half));
         let (mut vx, mut vy) = (ex - sx, ey - sy);
         let mut len = vx.hypot(vy);
         if len < 1.0 {
             (vx, vy, len) = (cos, -sin, 1.0);
         }
         let (ux, uy) = (vx / len, vy / len);
-        let (dx, dy) = (px - sx, py - sy);
+        // Photoshop measures from pixel corners.
+        let (dx, dy) = (px - 0.5 - sx, py - 0.5 - sy);
         let along = dx * ux + dy * uy;
         let across = dx * uy - dy * ux;
         let t = match self.style {
@@ -398,6 +458,7 @@ mod tests {
             colors: vec![stop(0.0, [0.0; 3]), stop(1.0, [1.0; 3])],
             alphas: vec![Stop { at: 0.0, mid: 0.5, value: 1.0 }],
             smooth: 0.0,
+            lab: false,
         }
     }
 
@@ -408,6 +469,21 @@ mod tests {
         g.colors[0].mid = 0.25;
         assert_eq!(g.sample(0.25)[0], 0.5);
         assert_eq!(g.sample(2.0), [1.0; 4]);
+    }
+
+    #[test]
+    fn smooth_ramps_are_hermite_curves() {
+        // Two stops at the ends lean half their slope: halfway to a smoothstep.
+        let g = Gradient { smooth: 1.0, ..bw() };
+        let u: f64 = 0.25;
+        let ss = u * u * (3.0 - 2.0 * u);
+        assert!((g.sample(u)[0] as f64 - (u + ss) / 2.0).abs() < 1e-6);
+        // A peak and stops before flat runs are flat: a full smoothstep, never past the stops.
+        let g = Gradient { colors: vec![stop(0.1, [0.0; 3]), stop(0.5, [1.0; 3]), stop(0.9, [0.0; 3])], ..g };
+        let v = 0.1 + 0.4 * u;
+        assert!((g.sample(v)[0] as f64 - ss).abs() < 1e-6);
+        assert_eq!(g.sample(0.05)[0], 0.0);
+        assert_eq!(g.sample(0.5)[0], 1.0);
     }
 
     #[test]
@@ -422,13 +498,14 @@ mod tests {
             offset: (0.0, 0.0),
         };
         let b = [0.0, 0.0, 100.0, 10.0];
-        assert!((f.position(0.0, 5.0, b)).abs() < 1e-9);
-        assert!((f.position(100.0, 5.0, b) - 1.0).abs() < 1e-9);
+        // Positions are measured from pixel corners: (x, y) is the center of pixel (x - 0.5, y - 0.5).
+        assert!((f.position(0.5, 5.5, b)).abs() < 1e-9);
+        assert!((f.position(100.5, 5.5, b) - 1.0).abs() < 1e-9);
         let up = GradientFill { angle: 90.0, ..f.clone() };
-        assert!((up.position(50.0, 10.0, b)).abs() < 1e-9);
+        assert!((up.position(50.5, 10.5, b)).abs() < 1e-9);
         let radial = GradientFill { style: Style::Radial, ..f };
-        assert!((radial.position(50.0, 5.0, b)).abs() < 1e-9);
-        assert!((radial.position(100.0, 5.0, b) - 1.0).abs() < 1e-9);
+        assert!((radial.position(50.5, 5.5, b)).abs() < 1e-9);
+        assert!((radial.position(100.5, 5.5, b) - 1.0).abs() < 1e-9);
     }
 
     #[test]
