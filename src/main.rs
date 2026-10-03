@@ -49,6 +49,10 @@ struct Cli {
     #[arg(short, long = "fonts", value_name = "DIR")]
     fonts: Vec<PathBuf>,
 
+    /// Draw font FROM (a PostScript name from the PSD) with font TO; repeatable.
+    #[arg(long = "font-map", value_name = "FROM=TO", value_parser = parse_font_map)]
+    font_map: Vec<(String, String)>,
+
     /// Only use fonts from --fonts, PSDC_FONTS and ./fonts.
     #[arg(long)]
     no_system_fonts: bool,
@@ -96,7 +100,9 @@ Examples:
   psdc chapter/*.psd -o rendered/    compile a batch in parallel
   psdc page.psd -o page.jpg -Q 85    write a JPEG
   psdc page.psd --list-text          show the type layers
-  psdc page.psd --set-text 'Title=Hello\\nworld' -o hello.png";
+  psdc page.psd --set-text 'Title=Hello\\nworld' -o hello.png
+  psdc page.psd --set-text 'Card/Title=Hi'   edit text inside a smart object
+  psdc page.psd --font-map CCWildWords-Roman=Anton-Regular";
 
 fn parse_format(s: &str) -> Result<Format, String> {
     Format::from_extension(s).ok_or_else(|| format!("unknown format {s:?} (png, jpg, webp, tif, avif)"))
@@ -114,7 +120,12 @@ fn parse_set_text(s: &str) -> Result<(String, String), String> {
     Ok((layer.to_string(), text.replace("\\n", "\n")))
 }
 
-fn font_db(cli: &Cli) -> FontDb {
+fn parse_font_map(s: &str) -> Result<(String, String), String> {
+    let (from, to) = s.split_once('=').ok_or("expected FROM=TO")?;
+    Ok((from.trim().to_string(), to.trim().to_string()))
+}
+
+fn font_db(cli: &Cli) -> Result<FontDb> {
     let mut db = FontDb::default_cache_path().map(FontDb::with_cache).unwrap_or_default();
     for dir in &cli.fonts {
         db.add_dir(dir);
@@ -132,7 +143,12 @@ fn font_db(cli: &Cli) -> FontDb {
         db.add_system_fonts();
     }
     let _ = db.save_cache();
-    db
+    for (from, to) in &cli.font_map {
+        if !db.alias(from, to) {
+            bail!("--font-map {from}={to}: no font named {to:?}");
+        }
+    }
+    Ok(db)
 }
 
 /// The output path and format for `input`.
@@ -243,7 +259,7 @@ fn run(cli: &Cli) -> Result<usize> {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
     let start = Instant::now();
-    let fonts = font_db(cli);
+    let fonts = font_db(cli)?;
     if cli.timings && !cli.quiet {
         eprintln!("fonts: {} faces in {:.0} ms", fonts.len(), ms(start));
     }

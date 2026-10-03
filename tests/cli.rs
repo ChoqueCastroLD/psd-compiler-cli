@@ -97,3 +97,12 @@ fn set_text_needs_a_matching_layer() {
     assert!(list.status.success());
     assert!(!dir.path().join("page.png").exists());
 }
+
+#[test]
+fn font_map_needs_a_known_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = sample(dir.path(), "page.psd", [0, 0, 0, 255]);
+    let out = psdc().arg(&input).args(["--font-map", "A=NoSuchFont", "--no-system-fonts"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no font named \"NoSuchFont\""));
+}

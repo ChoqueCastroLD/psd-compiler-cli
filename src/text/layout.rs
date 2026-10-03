@@ -38,7 +38,8 @@ pub(crate) struct Glyph {
 
 pub(crate) struct Layout {
     pub glyphs: Vec<Glyph>,
-    pub missing_fonts: Vec<String>,
+    /// Fonts that were not found, and the face drawn instead.
+    pub substitutions: Vec<(String, Option<String>)>,
 }
 
 struct PlacedGlyph {
@@ -327,14 +328,33 @@ fn break_lines(tl: &TextLayer, items: &[Item], box_bounds: Option<[f64; 4]>) -> 
 /// Vertical text is laid out as horizontal lines in a frame turned 90 degrees (lines become
 /// columns running right to left), with upright characters turned back.
 pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
-    let styles = effective_styles(&tl.styles);
+    let mut styles = effective_styles(&tl.styles);
+    // Missing fonts: the closest face, with synthetic bold or italic where it lacks them.
+    let mut resolved: Vec<(String, Option<crate::fonts::Match>)> = vec![];
+    let mut substitutions: Vec<(String, Option<String>)> = vec![];
+    for s in &mut styles {
+        let m = match resolved.iter().find(|(f, _)| *f == s.font) {
+            Some((_, m)) => *m,
+            None => {
+                let m = db.resolve(&s.font);
+                if !m.is_some_and(|m| m.exact) {
+                    substitutions.push((s.font.clone(), m.map(|m| db.name(m.face).to_owned())));
+                }
+                resolved.push((s.font.clone(), m));
+                m
+            }
+        };
+        if let Some(m) = m {
+            s.faux_bold |= m.synthetic_bold;
+            s.faux_italic |= m.synthetic_italic;
+        }
+    }
     let tl = &TextLayer { styles, ..tl.clone() };
     let vertical = tl.vertical;
     // In the turned frame u runs down the column and v leftward across columns: (x, y) = (-v, u).
     let box_bounds = if vertical { tl.box_bounds.map(|b| [b[1], -b[2], b[3], -b[0]]) } else { tl.box_bounds };
     let place = move |u: f64, v: f64| if vertical { (-v, u) } else { (u, v) };
     let mut faces = Faces::new(db);
-    let mut missing_fonts: Vec<String> = vec![];
     let n = tl.chars.len();
     let mut items: Vec<Item> = Vec::with_capacity(n);
     let mut i = 0;
@@ -344,17 +364,14 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
             j += 1;
         }
         let style = &tl.styles[i];
-        let primary = db.find(&style.font);
-        if primary.is_none() && !missing_fonts.contains(&style.font) {
-            missing_fonts.push(style.font.clone());
-        }
+        let primary = resolved.iter().find(|(f, _)| *f == style.font).and_then(|(_, m)| m.map(|m| m.face));
         let kerning: Vec<bool> = tl.styles[i..(j + 1).min(n)].iter().map(|s| s.kerning).collect();
         shape_span(&mut faces, &tl.chars[i..j], &kerning, style, primary, &mut items, i, vertical);
         i = j;
     }
     let lines = break_lines(tl, &items, box_bounds);
     if lines.is_empty() {
-        return Layout { glyphs: vec![], missing_fonts };
+        return Layout { glyphs: vec![], substitutions };
     }
 
     let leading = |k: usize| {
@@ -465,7 +482,7 @@ pub(crate) fn layout(tl: &TextLayer, db: &FontDb) -> Layout {
     if !tl.warp.is_identity() {
         apply_warp(tl, &mut glyphs);
     }
-    Layout { glyphs, missing_fonts }
+    Layout { glyphs, substitutions }
 }
 
 /// The warp envelope spans the bounds Photoshop stored for the layer, else the glyph bounds.

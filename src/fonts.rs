@@ -8,6 +8,90 @@ use rustybuzz::ttf_parser;
 
 const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
 const FALLBACK_FAMILIES: [&str; 4] = ["dejavusans", "notosans", "liberationsans", "arial"];
+const SERIF_FAMILIES: [&str; 5] = ["dejavuserif", "notoserif", "liberationserif", "timesnewroman", "times"];
+const MONO_FAMILIES: [&str; 4] = ["dejavusansmono", "notosansmono", "liberationmono", "couriernew"];
+const SERIF_HINTS: [&str; 12] = [
+    "serif",
+    "times",
+    "georgia",
+    "garamond",
+    "minion",
+    "baskerville",
+    "bodoni",
+    "caslon",
+    "palatino",
+    "cambria",
+    "didot",
+    "roman",
+];
+const MONO_HINTS: [&str; 6] = ["mono", "courier", "consol", "code", "menlo", "typewriter"];
+/// Weight words, longest first so "semibold" is not read as "bold".
+const WEIGHTS: [(&str, u16); 14] = [
+    ("extralight", 200),
+    ("ultralight", 200),
+    ("extrabold", 800),
+    ("ultrabold", 800),
+    ("semibold", 600),
+    ("demibold", 600),
+    ("hairline", 100),
+    ("medium", 500),
+    ("light", 300),
+    ("black", 900),
+    ("heavy", 900),
+    ("thin", 100),
+    ("bold", 700),
+    ("book", 400),
+];
+
+/// How a font name was resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Match {
+    pub face: usize,
+    /// The face belongs to the requested family.
+    pub same_family: bool,
+    /// The face is the one requested (or one of its family with the same style).
+    pub exact: bool,
+    /// Bold or italic were asked for but the face is not; draw them synthetically.
+    pub synthetic_bold: bool,
+    pub synthetic_italic: bool,
+}
+
+/// Weight and slant read from a font name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Style {
+    weight: u16,
+    italic: bool,
+}
+
+impl Style {
+    fn parse(words: &str) -> Style {
+        let w = normalize(words);
+        let weight = WEIGHTS.iter().find(|(k, _)| w.contains(k)).map_or(400, |&(_, v)| v);
+        let italic = w.contains("italic") || w.contains("oblique") || w.ends_with("it") || w.ends_with("itmt");
+        Style { weight, italic }
+    }
+
+    /// The style part of a PostScript name, `Family-Style`.
+    fn of_request(name: &str) -> Style {
+        name.split_once('-').map_or(Style { weight: 400, italic: false }, |(_, s)| Style::parse(s))
+    }
+
+    fn of_face(postscript: &str, family: &str) -> Style {
+        match postscript.split_once('-') {
+            Some((_, s)) => Style::parse(s),
+            None => Style::parse(&normalize(postscript).replacen(&normalize(family), "", 1)),
+        }
+    }
+
+    /// Mismatch of `other` against this wanted style. As in CSS, ties go to lighter faces for
+    /// weights up to 500 and to heavier ones above.
+    fn distance(self, other: Style) -> u32 {
+        let wrong_side = if self.weight > 500 { other.weight < self.weight } else { other.weight > self.weight };
+        2 * self.weight.abs_diff(other.weight) as u32
+            + wrong_side as u32
+            + if self.italic == other.italic { 0 } else { 2000 }
+    }
+}
 
 struct Face {
     path: PathBuf,
@@ -218,16 +302,85 @@ impl FontDb {
         self.find(name).map(|i| self.faces[i].path.as_path())
     }
 
-    pub(crate) fn find(&self, name: &str) -> Option<usize> {
-        let key = normalize(name);
-        if let Some(&i) = self.by_name.get(&key) {
-            return Some(i);
+    /// Makes `from` resolve to the face that provides `to`; returns false if `to` is unknown.
+    pub fn alias(&mut self, from: &str, to: &str) -> bool {
+        match self.find(to) {
+            Some(i) => {
+                self.by_name.insert(normalize(from), i);
+                true
+            }
+            None => false,
         }
+    }
+
+    /// The face for `name`, exactly or from its family.
+    pub(crate) fn find(&self, name: &str) -> Option<usize> {
+        self.resolve(name).filter(|m| m.same_family).map(|m| m.face)
+    }
+
+    /// The face for `name`: the face itself, else the closest style of its family, else the
+    /// closest style of a common family of the same kind (sans, serif or monospace).
+    pub(crate) fn resolve(&self, name: &str) -> Option<Match> {
+        let key = normalize(name);
+        if let Some(&face) = self.by_name.get(&key) {
+            return Some(Match {
+                face,
+                same_family: true,
+                exact: true,
+                synthetic_bold: false,
+                synthetic_italic: false,
+            });
+        }
+        let want = Style::of_request(name);
         let base = normalize(name.split('-').next().unwrap_or(""));
         if base.is_empty() {
             return None;
         }
-        self.faces.iter().position(|f| normalize(&f.family) == base || normalize(&f.postscript_name) == base)
+        let family = |i: &usize| {
+            let f = &self.faces[*i];
+            normalize(&f.family) == base || normalize(f.postscript_name.split('-').next().unwrap_or("")) == base
+        };
+        if let Some(m) = self.closest(want, family) {
+            return Some(Match {
+                same_family: true,
+                exact: want.distance(self.style(m)) == 0,
+                ..self.matched(m, want)
+            });
+        }
+        let fallbacks: &[&str] = match () {
+            _ if MONO_HINTS.iter().any(|h| key.contains(h)) => &MONO_FAMILIES,
+            _ if SERIF_HINTS.iter().any(|h| key.contains(h)) && !key.contains("sans") => &SERIF_FAMILIES,
+            _ => &FALLBACK_FAMILIES,
+        };
+        fallbacks.iter().find_map(|fam| {
+            let in_family = |i: &usize| normalize(&self.faces[*i].family) == *fam;
+            self.closest(want, in_family).map(|m| self.matched(m, want))
+        })
+    }
+
+    fn style(&self, i: usize) -> Style {
+        Style::of_face(&self.faces[i].postscript_name, &self.faces[i].family)
+    }
+
+    /// The face passing `filter` whose style is nearest `want`; earlier faces win ties.
+    fn closest(&self, want: Style, filter: impl Fn(&usize) -> bool) -> Option<usize> {
+        (0..self.faces.len()).filter(filter).min_by_key(|&i| want.distance(self.style(i)))
+    }
+
+    fn matched(&self, face: usize, want: Style) -> Match {
+        let got = self.style(face);
+        Match {
+            face,
+            same_family: false,
+            exact: false,
+            synthetic_bold: want.weight >= 600 && got.weight < 600,
+            synthetic_italic: want.italic && !got.italic,
+        }
+    }
+
+    /// PostScript name of face `i`.
+    pub(crate) fn name(&self, i: usize) -> &str {
+        &self.faces[i].postscript_name
     }
 
     pub(crate) fn face(&self, i: usize) -> Option<rustybuzz::Face<'_>> {
@@ -305,9 +458,50 @@ mod tests {
         assert_eq!(db.find("anton-regular"), Some(0));
         assert_eq!(db.find("Wild Words Full"), Some(1));
         assert_eq!(db.find("Anton-Italic"), Some(0));
+        assert!(db.resolve("Anton-Italic").unwrap().synthetic_italic);
         assert_eq!(db.find("Missing-Bold"), None);
         assert_eq!(db.find(""), None);
         assert_eq!(db.len(), 2);
+    }
+
+    #[test]
+    fn picks_the_closest_style_of_the_family() {
+        let mut db = FontDb::new();
+        for ps in ["Lato-Regular", "Lato-Bold", "Lato-Italic", "Lato-BlackItalic", "Lato-SemiBold"] {
+            db.push(Path::new("/lato.ttf"), names(ps, "Lato"));
+        }
+        let pick = |n: &str| db.name(db.resolve(n).unwrap().face).to_owned();
+        assert_eq!(pick("Lato-Bold"), "Lato-Bold");
+        assert_eq!(pick("Lato-ExtraBold"), "Lato-Bold");
+        assert_eq!(pick("Lato-BoldItalic"), "Lato-BlackItalic");
+        assert_eq!(pick("Lato-LightItalic"), "Lato-Italic");
+        assert_eq!(pick("Lato-Medium"), "Lato-Regular");
+        let m = db.resolve("Lato-ExtraBold").unwrap();
+        assert!(m.same_family && !m.exact && !m.synthetic_bold);
+    }
+
+    #[test]
+    fn falls_back_to_a_family_of_the_same_kind() {
+        let mut db = FontDb::new();
+        db.push(Path::new("/s.ttf"), names("DejaVuSans", "DejaVu Sans"));
+        db.push(Path::new("/sb.ttf"), names("DejaVuSans-Bold", "DejaVu Sans"));
+        db.push(Path::new("/r.ttf"), names("DejaVuSerif", "DejaVu Serif"));
+        db.push(Path::new("/m.ttf"), names("DejaVuSansMono", "DejaVu Sans Mono"));
+        let pick = |n: &str| db.name(db.resolve(n).unwrap().face).to_owned();
+        assert_eq!(pick("Helvetica-Bold"), "DejaVuSans-Bold");
+        assert_eq!(pick("TimesNewRomanPS-BoldMT"), "DejaVuSerif");
+        assert!(db.resolve("TimesNewRomanPS-BoldMT").unwrap().synthetic_bold);
+        assert_eq!(pick("CourierNewPSMT"), "DejaVuSansMono");
+        assert_eq!(db.find("Helvetica-Bold"), None);
+    }
+
+    #[test]
+    fn aliases_redirect_names() {
+        let mut db = FontDb::new();
+        db.push(Path::new("/a.ttf"), names("Anton-Regular", "Anton"));
+        assert!(db.alias("CCWildWords-Regular", "Anton-Regular"));
+        assert!(!db.alias("X", "Nope"));
+        assert_eq!(db.resolve("CCWildWords-Regular").map(|m| (m.face, m.exact)), Some((0, true)));
     }
 
     #[test]

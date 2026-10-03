@@ -197,8 +197,11 @@ fn draw_text(
     warnings: &mut Vec<String>,
 ) -> Option<Raster> {
     let laid = layout::layout(tl, fonts);
-    for f in &laid.missing_fonts {
-        warnings.push(format!("font {f} not found; using a fallback"));
+    for (f, used) in &laid.substitutions {
+        warnings.push(match used {
+            Some(u) => format!("font {f} not found; using {u}"),
+            None => format!("font {f} not found; using a fallback"),
+        });
     }
     let t = tl.transform;
     let scale = (t[0] * t[3] - t[1] * t[2]).abs().sqrt();
