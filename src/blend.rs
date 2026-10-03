@@ -37,36 +37,37 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
-    /// Parses a layer record key (`mul `) or an effect descriptor enum (`Mltp`).
+    /// Parses a layer record key (`mul `) or an effect descriptor enum (`Mltp`, or `multiply` in
+    /// recent files).
     pub fn from_key(key: &[u8]) -> BlendMode {
         let key = std::str::from_utf8(key).unwrap_or("").trim_end();
         match key {
-            "diss" | "Dslv" => BlendMode::Dissolve,
-            "dark" | "Drkn" => BlendMode::Darken,
-            "mul" | "Mltp" => BlendMode::Multiply,
-            "idiv" | "CBrn" => BlendMode::ColorBurn,
+            "diss" | "Dslv" | "dissolve" => BlendMode::Dissolve,
+            "dark" | "Drkn" | "darken" => BlendMode::Darken,
+            "mul" | "Mltp" | "multiply" => BlendMode::Multiply,
+            "idiv" | "CBrn" | "colorBurn" => BlendMode::ColorBurn,
             "lbrn" | "linearBurn" => BlendMode::LinearBurn,
             "dkCl" | "darkerColor" => BlendMode::DarkerColor,
-            "lite" | "Lghn" => BlendMode::Lighten,
-            "scrn" | "Scrn" => BlendMode::Screen,
-            "div" | "CDdg" => BlendMode::ColorDodge,
+            "lite" | "Lghn" | "lighten" => BlendMode::Lighten,
+            "scrn" | "Scrn" | "screen" => BlendMode::Screen,
+            "div" | "CDdg" | "colorDodge" => BlendMode::ColorDodge,
             "lddg" | "linearDodge" => BlendMode::LinearDodge,
             "lgCl" | "lighterColor" => BlendMode::LighterColor,
-            "over" | "Ovrl" => BlendMode::Overlay,
-            "sLit" | "SftL" => BlendMode::SoftLight,
-            "hLit" | "HrdL" => BlendMode::HardLight,
+            "over" | "Ovrl" | "overlay" => BlendMode::Overlay,
+            "sLit" | "SftL" | "softLight" => BlendMode::SoftLight,
+            "hLit" | "HrdL" | "hardLight" => BlendMode::HardLight,
             "vLit" | "vividLight" => BlendMode::VividLight,
             "lLit" | "linearLight" => BlendMode::LinearLight,
             "pLit" | "pinLight" => BlendMode::PinLight,
             "hMix" | "hardMix" => BlendMode::HardMix,
-            "diff" | "Dfrn" => BlendMode::Difference,
-            "smud" | "Xclu" => BlendMode::Exclusion,
+            "diff" | "Dfrn" | "difference" => BlendMode::Difference,
+            "smud" | "Xclu" | "exclusion" => BlendMode::Exclusion,
             "fsub" | "blendSubtraction" => BlendMode::Subtract,
             "fdiv" | "blendDivide" => BlendMode::Divide,
             "hue" | "H" => BlendMode::Hue,
-            "sat" | "Strt" => BlendMode::Saturation,
-            "colr" | "Clr" => BlendMode::Color,
-            "lum" | "Lmns" => BlendMode::Luminosity,
+            "sat" | "Strt" | "saturation" => BlendMode::Saturation,
+            "colr" | "Clr" | "color" => BlendMode::Color,
+            "lum" | "Lmns" | "luminosity" => BlendMode::Luminosity,
             "pass" => BlendMode::PassThrough,
             _ => BlendMode::Normal,
         }
@@ -209,6 +210,7 @@ mod tests {
     fn parses_record_and_descriptor_keys() {
         assert_eq!(BlendMode::from_key(b"mul "), Multiply);
         assert_eq!(BlendMode::from_key(b"Mltp"), Multiply);
+        assert_eq!(BlendMode::from_key(b"colorBurn"), ColorBurn);
         assert_eq!(BlendMode::from_key(b"pass"), PassThrough);
         assert_eq!(BlendMode::from_key(b"norm"), Normal);
         assert_eq!(BlendMode::from_key(b"\xff\xff"), Normal);

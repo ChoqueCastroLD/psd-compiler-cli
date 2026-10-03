@@ -141,6 +141,17 @@ fn keep_text_uses_cached_pixels() {
 }
 
 #[test]
+fn text_blends_with_gamma() {
+    // Measured from Photoshop: red text at 40% coverage over white leaves green at 184, not 153.
+    let text = Text::new("Hi", "NoSuchFont-Regular", 20.0, [1.0, 0.0, 0.0], 5.0, 20.0);
+    let layer = Layer::text("t", &text).with_pixels(4, 4, 10, 10, [255, 0, 0, 102]);
+    let doc = Document::parse(&white(30, 30).layer(layer).build()).unwrap();
+    let opts = RenderOptions { keep_text_raster: true, ..Default::default() };
+    let p = render(&doc, &psd_compiler::FontDb::new(), &opts).image.pixel(8, 8);
+    assert!(p[0] == 255 && p[1].abs_diff(184) <= 3, "{p:?}");
+}
+
+#[test]
 fn unreadable_text_uses_cached_pixels() {
     let layer = Layer::solid("t", 4, 4, 10, 10, [9, 9, 9, 255]).block(b"TySh", vec![0, 1, 2]);
     let doc = Document::parse(&white(30, 30).layer(layer).build()).unwrap();

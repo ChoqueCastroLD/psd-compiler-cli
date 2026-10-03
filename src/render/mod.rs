@@ -316,6 +316,32 @@ impl Comp {
         }
     }
 
+    /// Fades what was painted over `under` (a crop of the canvas before, `ga` its group alpha)
+    /// to `opacity`.
+    fn fade(&mut self, under: &Raster, ga: &[f32], opacity: f32) {
+        let Some((x0, y0, x1, y1)) = intersect(self.rect(), raster_rect(under)) else { return };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (i, j) = (self.at(x, y), under.index(x, y));
+                for c in 0..4 {
+                    let p = &mut self.cv.px[i * 4 + c];
+                    *p = under.px[j + c] + opacity * (*p - under.px[j + c]);
+                }
+                self.ga[i] = ga[i] + opacity * (self.ga[i] - ga[i]);
+            }
+        }
+    }
+
+    /// Raises the colors inside `rect` to the power `g`.
+    fn regamma(&mut self, rect: Rect, g: f32) {
+        let Some((x0, y0, x1, y1)) = intersect(self.rect(), rect) else { return };
+        for y in y0..y1 {
+            let i = self.at(x0, y) * 4;
+            let n = (x1 - x0) as usize * 4;
+            regamma(&mut self.cv.px[i..i + n], g);
+        }
+    }
+
     fn weight<'a>(&'a self, w: impl Fn(i32, i32) -> f32 + Sync + 'a) -> impl Fn(i32, i32) -> f32 + Sync + 'a {
         move |x, y| if self.adjust_isolated { w(x, y) * self.sg[self.at(x, y)] } else { w(x, y) }
     }
@@ -648,6 +674,29 @@ impl Compositor<'_> {
             }
             f = 1.0;
         }
+        // Photoshop blends a layer's interior effects onto the result of the layer over its
+        // backdrop, within its shape: the same as blending them into the layer in Normal mode, not
+        // in the others.
+        let on_top = !interior_grouped
+            && plain.is_none()
+            && knockout(l) == 0
+            && !l.blend_if
+            && !matches!(mode, BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough)
+            && !s.prepared.inner.is_empty()
+            && s.prepared.inner.iter().all(|e| e.paint == effects::Paint::Over);
+        if on_top {
+            let under = comp.cv.crop(rect.0, rect.1, rect.2, rect.3);
+            let ga = (o < 1.0).then(|| comp.ga.clone());
+            comp.paint(&effects::assemble(&s.content, &s.coverage, (f, 0), 1.0, &[], None), Some(&s.coverage), mode, 0);
+            let mid = comp.cv.crop(rect.0, rect.1, rect.2, rect.3);
+            let fx = effects::assemble(&mid, &s.coverage, (1.0, 0), 1.0, &s.prepared.inner, Some(&under));
+            comp.paint(&fx, Some(&s.coverage), BlendMode::Normal, 0);
+            if let Some(ga) = ga {
+                comp.fade(&under, &ga, o);
+            }
+            self.restrict(comp, before, &restricted);
+            return;
+        }
         let grouped = if interior_grouped { s.prepared.interior } else { 0 };
         let mut body = effects::assemble(&s.content, &s.coverage, (f, grouped), 1.0, &s.prepared.inner, Some(&comp.cv));
         if !clips.is_empty() && interior_grouped {
@@ -675,13 +724,29 @@ impl Compositor<'_> {
         if mode == BlendMode::Dissolve {
             dissolve(&mut body);
         }
+        // Photoshop blends text colors with a gamma ("Blend Text Colors Using Gamma"), measured at
+        // about 1.53 from its composites.
+        let gamma = (l.kind == LayerKind::Text && plain.is_none()).then_some(TEXT_GAMMA);
+        if let Some(g) = gamma {
+            regamma(&mut body.px, g);
+            comp.regamma(raster_rect(&body), g);
+        }
         match &plain {
             Some(plain) => comp.paint_split(&body, plain, &s.coverage, mode),
             None => comp.paint(&body, Some(&s.coverage), mode, knockout(l)),
         }
+        if let Some(g) = gamma {
+            comp.regamma(raster_rect(&body), 1.0 / g);
+        }
+        self.restrict(comp, before, &restricted);
+    }
+
+    /// Puts back the backdrop's values (`before`) in the channels a layer's advanced blending
+    /// leaves unchecked.
+    fn restrict(&self, comp: &mut Comp, before: Option<Vec<f32>>, restricted: &[usize]) {
         if let Some(before) = before {
             for (p, q) in comp.cv.px.chunks_exact_mut(4).zip(before.chunks_exact(4)) {
-                for &ch in &restricted {
+                for &ch in restricted {
                     p[ch] = if q[3] > 0.0 { q[ch] / q[3] * p[3] } else { 0.0 };
                 }
             }
@@ -691,6 +756,20 @@ impl Compositor<'_> {
     fn skip_refs(&mut self, nodes: &[&Node]) {
         for n in nodes {
             self.skip(std::slice::from_ref(*n));
+        }
+    }
+}
+
+const TEXT_GAMMA: f32 = 1.53;
+
+/// Raises the straight colors of premultiplied pixels to the power `g`.
+fn regamma(px: &mut [f32], g: f32) {
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3];
+        if a > 0.0 {
+            for ch in 0..3 {
+                p[ch] = (p[ch] / a).clamp(0.0, 1.0).powf(g) * a;
+            }
         }
     }
 }

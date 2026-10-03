@@ -166,6 +166,16 @@ fn restricted_channels_keep_the_backdrop() {
 }
 
 #[test]
+fn interior_effects_blend_over_the_blended_layer() {
+    // Photoshop paints a color overlay onto the result of the layer over its backdrop: in Normal
+    // mode it hides the layer's Darken entirely.
+    let gray = Psd::new(4, 4).layer(Layer::solid("bg", 0, 0, 4, 4, [128, 128, 128, 255]));
+    let layer = Layer::solid("l", 0, 0, 4, 4, [242, 85, 85, 255]).blend(b"dark");
+    let img = draw(gray.layer(layer.effects(&[Effect::Overlay { rgb: [65, 217, 217] }])));
+    assert!(close(img.pixel(1, 1), [65, 217, 217, 255], 1), "{:?}", img.pixel(1, 1));
+}
+
+#[test]
 fn faded_modes_show_plainly_over_transparency() {
     // Matches Photoshop: a Linear Light layer at 20% fill blends its faded color where the
     // backdrop is covered and shows at 20% where it is transparent.
