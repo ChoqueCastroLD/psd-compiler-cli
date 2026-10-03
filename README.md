@@ -207,7 +207,7 @@ Measured against Photoshop on production comic pages:
 |---|---|---|
 | Text layers (body, bold, stroked) | IoU of glyph coverage vs Photoshop raster | **≈ 0.97** |
 | Warp presets (all 15) | IoU vs reference renders | **0.94 – 0.98** |
-| The 491 test files of [psd-tools](https://github.com/psd-tools/psd-tools), [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd), [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd), [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk) and [psd.js](https://github.com/meltingice/psd.js) | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **481 / 491 (98.0%)** |
+| The 511 test files of [psd-tools](https://github.com/psd-tools/psd-tools), [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd), [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd), [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk), [psd.js](https://github.com/meltingice/psd.js) and [Krita](https://invent.kde.org/graphics/krita) | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **501 / 511 (98.0%)** |
 
 The reference test renders every file from its layers and compares it with the merged image Photoshop saved, then prints the match rate of every feature (color modes, depths, layer kinds, blend modes, masks, each effect and adjustment). CI runs it on every push; locally:
 

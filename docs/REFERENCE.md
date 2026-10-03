@@ -13,7 +13,7 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
-single color (113 of the 491, e.g. an adjustment over an empty canvas) count toward the total but not
+single color (115 of the 511, e.g. an adjustment over an empty canvas) count toward the total but not
 toward the feature rates, since they cannot show whether a feature renders right.
 
 Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
@@ -25,7 +25,7 @@ CI runs it on the test files of [psd-tools](https://github.com/psd-tools/psd-too
 [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd),
 [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd),
 [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk)
-and [psd.js](https://github.com/meltingice/psd.js), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
+[psd.js](https://github.com/meltingice/psd.js) and [Krita](https://invent.kde.org/graphics/krita) (its PSD import tests), each pinned to a commit. Files ag-psd wrote itself (`test/write`, `expected.psd`) are left out: they
 carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files. None of the
 files are committed here.
 
@@ -37,7 +37,8 @@ files are committed here.
 | ag-psd `test` | 73 / 76 (96.1%) |
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
 | PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
-| All | 481 / 491 (98.0%) |
+| Krita `plugins/impex/psd/tests/data` | 20 / 20 |
+| All | 501 / 511 (98.0%) |
 
 ### Misses
 

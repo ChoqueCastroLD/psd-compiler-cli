@@ -59,6 +59,7 @@ jobs:
       PHOTOSHOP_API_COMMIT: 51bb741ba623a69d7a02b29e0e6645494bf4a9c6
       PSD_SDK_COMMIT: bfa117317e8bb15bfc9f76bad5800da603fddd1d
       PSD_JS_COMMIT: 7e8392d20fd5d66ad70ddda7309661b9a0ca67c8
+      KRITA_COMMIT: 351297cdcec48aee3228f6c64a68d5d3b09e1796
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -94,6 +95,12 @@ jobs:
           fetch psd-sdk MolecularMatters/psd_sdk "$PSD_SDK_COMMIT"
           fetch psd-js meltingice/psd.js "$PSD_JS_COMMIT"
           rm -rf webtoon-psd/packages/psd/tests/integration/fixtures/errors
+          # Only Krita's PSD test files, not the whole tree.
+          git init -q krita
+          git -C krita remote add origin https://invent.kde.org/graphics/krita.git
+          git -C krita sparse-checkout set --no-cone /plugins/impex/psd/tests/data/
+          git -C krita fetch -q --depth 1 --filter=blob:none origin "$KRITA_COMMIT"
+          git -C krita checkout -q FETCH_HEAD
       - run: cargo test --release --test reference -- --nocapture
         env:
-          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js
+          PSDC_REFERENCE_DIR: psd-tools/tests/psd_files:ag-psd:webtoon-psd:psd-rb:psd-rs:photoshop-api:psd-sdk:psd-js:krita/plugins/impex/psd/tests/data
