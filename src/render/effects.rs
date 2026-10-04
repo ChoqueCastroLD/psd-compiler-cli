@@ -6,7 +6,7 @@
 use super::adjust;
 use super::canvas::Raster;
 use super::distance::{blur, chamfer_distance, distances, downsample, Distances, SS};
-use super::fill::{Fill, Gradient, GradientFill};
+use super::fill::{Fill, Gradient, GradientFill, PatternFill};
 use crate::blend::BlendMode;
 use crate::color::{self, ColorSpace};
 use crate::psd::descriptor::{Descriptor, Value};
@@ -98,6 +98,8 @@ pub(crate) struct Bevel {
     pub highlight: ([f32; 3], f32, BlendMode),
     pub shadow: ([f32; 3], f32, BlendMode),
     pub gloss: Option<Vec<f32>>,
+    /// Texture: a pattern whose luminance raises the surface, and its depth (negative inverts).
+    pub texture: Option<(PatternFill, f32)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -388,6 +390,14 @@ pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects
                 BlendMode::from_key(d.enumerated("sdwM").unwrap_or("Mltp").as_bytes()),
             ),
             gloss: contour(d),
+            texture: if d.bool("useTexture") == Some(true) {
+                PatternFill::parse(d).map(|f| {
+                    let depth = d.num("textureDepth").unwrap_or(100.0) as f32 / 100.0;
+                    (f, if d.bool("InvT") == Some(true) { -depth } else { depth })
+                })
+            } else {
+                None
+            },
         })
         .collect();
     e
@@ -741,7 +751,7 @@ impl Effects {
                 let Some((on, beside)) = &embossed else { continue };
                 let shape: Vec<f32> = a.iter().zip(beside).map(|(&q, &o)| (q + o).min(1.0)).collect();
                 let d = distances(&shape, w, h, true, b.size + 1.0);
-                let (hi, lo) = bevel_light(b, &d, &shape, w, h);
+                let (hi, lo) = bevel_light(b, &d, &shape, None, w, h);
                 for (layer, part) in [(&mut p.inner, on), (&mut p.beside, beside)] {
                     let masked = |v: &[f32]| v.iter().zip(part).map(|(&s, &c)| s * c).collect::<Vec<f32>>();
                     layer.push(Layered {
@@ -762,7 +772,13 @@ impl Effects {
                 continue;
             }
             let d = dist.as_ref().expect("bevels need distances");
-            let (hi, lo) = bevel_light(b, d, a, w, h);
+            let tex = b.texture.as_ref().map(|(f, depth)| {
+                let r = Fill::Pattern(f.clone()).render(doc, cs, x, y, w, h, None, bounds);
+                // Light texels stand up; the relief flattens outside the shape.
+                let luma = r.px.chunks_exact(4).zip(a).map(|(p, &q)| (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) * q);
+                luma.map(|v| v * depth).collect::<Vec<f32>>()
+            });
+            let (hi, lo) = bevel_light(b, d, a, tex.as_deref(), w, h);
             let inner = |v: &[f32]| v.iter().zip(a).map(|(&s, &r)| if r > 0.0 { s } else { 0.0 }).collect::<Vec<f32>>();
             let outer = |v: &[f32]| v.iter().zip(a).map(|(&s, &r)| s * (1.0 - r)).collect::<Vec<f32>>();
             if b.style != BevelStyle::Outer {
@@ -821,7 +837,7 @@ fn shape_glow(g: &Glow, cov: &mut [f32]) {
 }
 
 /// Highlight and shadow coverage of a bevel, from a height field lit at the bevel's angle and altitude.
-fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
+fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], tex: Option<&[f32]>, w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
     let size = b.size.max(0.5) as f32;
     let ramp = |t: f32| t.clamp(0.0, 1.0);
     // A smooth pillow folds the blurred shape at the edge level; each side is lit by its own slope.
@@ -872,8 +888,17 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
         for x in 0..w as isize {
             let i = y as usize * w + x as usize;
             let k = fold.as_ref().map_or(0.5 * lift, |f| 0.5 * lift * f[i]);
-            let gx = (at(x + 1, y) - at(x - 1, y)) * k;
-            let gy = (at(x, y + 1) - at(x, y - 1)) * k;
+            let mut gx = (at(x + 1, y) - at(x - 1, y)) * k;
+            let mut gy = (at(x, y + 1) - at(x, y - 1)) * k;
+            if let Some(t) = tex {
+                // The texture's relief does not grow with the bevel's depth or size. Weakly
+                // constrained: fit to PhotoshopAPI's smart_object_file_no_warp, the only sample.
+                let relief = |x: isize, y: isize| {
+                    t[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize]
+                };
+                gx += (relief(x + 1, y) - relief(x - 1, y)) * 2.0;
+                gy += (relief(x, y + 1) - relief(x, y - 1)) * 2.0;
+            }
             let n = [-gx, -gy, 1.0];
             let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
             let shade = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
@@ -1165,6 +1190,7 @@ mod tests {
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
             gloss: None,
+            texture: None,
         };
         let e = Effects { bevels: vec![b], ..Default::default() };
         let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
@@ -1190,6 +1216,7 @@ mod tests {
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
             gloss: None,
+            texture: None,
         };
         let lit = |b: &Bevel| {
             let e = Effects { bevels: vec![b.clone()], ..Default::default() };
@@ -1219,6 +1246,7 @@ mod tests {
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
             gloss: None,
+            texture: None,
         };
         let shade = |b: &Bevel, y: usize| {
             let e = Effects { bevels: vec![b.clone()], ..Default::default() };
@@ -1231,6 +1259,45 @@ mod tests {
         b.soften = 7.0;
         let (edge, inside) = (shade(&b, 29), shade(&b, 24));
         assert!(edge > 0.3 && edge < 0.7 && inside > 0.05, "{edge} {inside}");
+    }
+
+    #[test]
+    fn texture_raises_the_flat_top() {
+        let (w, h) = (40, 40);
+        let a = square(w, h, 5, 35);
+        let mut d = doc();
+        // Horizontal stripes, 4 texels apart.
+        let rgba = (0..8 * 8).flat_map(|i| if (i / 8) % 4 < 2 { [255u8; 4] } else { [0, 0, 0, 255] }).collect();
+        d.patterns.insert("p".into(), crate::psd::Pattern { width: 8, height: 8, rgba });
+        let mut b = Bevel {
+            style: BevelStyle::Inner,
+            smooth: true,
+            depth: 1.0,
+            up: true,
+            size: 3.0,
+            soften: 0.0,
+            angle: 90.0,
+            altitude: 30.0,
+            highlight: ([1.0; 3], 1.0, BlendMode::Screen),
+            shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+            gloss: None,
+            texture: None,
+        };
+        let lit = |b: &Bevel| {
+            let e = Effects { bevels: vec![b.clone()], ..Default::default() };
+            let p = e.prepare(&d, &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
+            (16..24).map(|y| p.inner[1].cov[y * w + 20] - p.inner[0].cov[y * w + 20]).collect::<Vec<f32>>()
+        };
+        assert!(lit(&b).iter().all(|v| v.abs() < 1e-3));
+        // Rows below a light stripe face away from the light above; rows above it face it.
+        let pattern = PatternFill { id: "p".into(), scale: 1.0, angle: 0.0, phase: (0.0, 0.0), align: true };
+        b.texture = Some((pattern.clone(), 1.0));
+        let up = lit(&b);
+        assert!(up.iter().any(|&v| v > 0.2) && up.iter().any(|&v| v < -0.2), "{up:?}");
+        // Inverting the depth swaps them.
+        b.texture = Some((pattern, -1.0));
+        let down = lit(&b);
+        assert!(up.iter().zip(&down).all(|(u, d)| u * d < 0.0), "{down:?}");
     }
 
     #[test]
@@ -1249,6 +1316,7 @@ mod tests {
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
             gloss: None,
+            texture: None,
         };
         let e = Effects { bevels: vec![b], ..Default::default() };
         let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
@@ -1275,6 +1343,7 @@ mod tests {
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
             gloss: None,
+            texture: None,
         };
         let stroke = Stroke {
             fill: Fill::Solid([0.0; 3]),

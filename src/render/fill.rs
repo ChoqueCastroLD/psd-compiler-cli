@@ -386,8 +386,10 @@ impl PatternFill {
             let (c, s) = (th.cos(), th.sin());
             (u, v) = (u * c - v * s, u * s + v * c);
         }
-        // Scaled patterns map pixel corners, not centers, onto texel centers.
-        let (u, v) = ((u - 0.5) / self.scale, (v - 0.5) / self.scale);
+        // Scaled patterns map pixel corners, not centers, onto texel centers; shrunk ones a quarter
+        // pixel further in (fit to a 7% and an 81% pattern overlay: PhotoshopAPI, ag-psd).
+        let shift = if self.scale < 1.0 { 0.25 } else { 0.0 };
+        let (u, v) = ((u - 0.5 + shift) / self.scale, (v - 0.5 + shift) / self.scale);
         let (w, h) = (p.width as f64, p.height as f64);
         let fetch = |i: i64, j: i64| {
             let i = i.rem_euclid(p.width as i64) as usize;

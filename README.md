@@ -45,7 +45,7 @@ PSD Compiler reads the type engine data (characters, style runs, paragraphs, war
 - 🎯 **Photoshop-grade text.** Kerning, tracking, leading, paragraph boxes, justification, faux bold and italic, all caps and small caps, baseline shift, underline and strikethrough. Text layers on real comic pages reach **IoU ≈ 0.97** against Photoshop's own rasters.
 - 🈳 **Vertical text and OpenType.** Upright CJK, rotated Latin and the `vert` feature, plus ligatures, contextual alternates, swashes, fractions, ordinals, oldstyle figures and super/subscript from the character styles.
 - 🌀 **Every warp.** All 15 presets (Arc, Arch, Bulge, Flag, Wave, Fish, Rise, Fisheye, Inflate, Squeeze, Twist, Shell…), built from the same Bézier patches Photoshop uses, plus custom and quilt warp meshes.
-- ✨ **All layer effects.** Stroke (solid, gradient or pattern; inside, center or outside), drop and inner shadow, outer and inner glow, satin, bevel and emboss, and color, gradient and pattern overlays, using Photoshop's blur and spread model.
+- ✨ **All layer effects.** Stroke (solid, gradient or pattern; inside, center or outside), drop and inner shadow, outer and inner glow, satin, bevel and emboss (with contours and textures), and color, gradient and pattern overlays, using Photoshop's blur and spread model.
 - 🎛️ **Adjustment layers.** Levels, curves, brightness/contrast, hue/saturation, color balance, vibrance, exposure, selective color, channel mixer, gradient map, photo filter, invert, posterize, threshold and black & white.
 - 🧩 **Smart objects.** Cached pixels by default; with `--render-smart-objects` (or after editing text inside one) they are re-rendered from the embedded PSD/PSB, PNG or JPEG through the placement's perspective and warp.
 - 🧱 **Full compositing.** All 27 blend modes, groups with pass-through and knockout, clipping masks, layer and vector masks, fill layers (solid, gradient, pattern), opacity and fill opacity.
@@ -207,7 +207,7 @@ Measured against Photoshop on production comic pages:
 |---|---|---|
 | Text layers (body, bold, stroked) | IoU of glyph coverage vs Photoshop raster | **≈ 0.97** |
 | Warp presets (all 15) | IoU vs reference renders | **0.94 – 0.98** |
-| The 734 test files of [psd-tools](https://github.com/psd-tools/psd-tools), [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd), [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd), [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk), [psd.js](https://github.com/meltingice/psd.js), [Krita](https://invent.kde.org/graphics/krita), [Aspose.PSD](https://github.com/aspose-psd/Aspose.PSD-for-.NET), [oov/psd](https://github.com/oov/psd) and [Artal](https://github.com/EvineDev/Artal) | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **721 / 734 (98.2%)** |
+| The 734 test files of [psd-tools](https://github.com/psd-tools/psd-tools), [ag-psd](https://github.com/Agamnentzar/ag-psd), [webtoon/psd](https://github.com/webtoon/psd), [psd.rb](https://github.com/layervault/psd.rb), [chinedufn/psd](https://github.com/chinedufn/psd), [PhotoshopAPI](https://github.com/EmilDohne/PhotoshopAPI), [psd_sdk](https://github.com/MolecularMatters/psd_sdk), [psd.js](https://github.com/meltingice/psd.js), [Krita](https://invent.kde.org/graphics/krita), [Aspose.PSD](https://github.com/aspose-psd/Aspose.PSD-for-.NET), [oov/psd](https://github.com/oov/psd) and [Artal](https://github.com/EvineDev/Artal) | Match the composite Photoshop stored (mean difference ≤ 2/255, ≤ 1% of pixels off by more than 16) | **722 / 734 (98.4%)** |
 
 The reference test renders every file from its layers and compares it with the merged image Photoshop saved, then prints the match rate of every feature (color modes, depths, layer kinds, blend modes, masks, each effect and adjustment). CI runs it on every push; locally:
 
@@ -248,7 +248,7 @@ Here is why it is fast:
 | Blend modes | All 27, including Dissolve, Hue/Saturation/Color/Luminosity | |
 | Text | Point and paragraph text, runs, kerning, tracking, leading, scale, baseline shift, caps, faux styles, decorations, all justification modes, indents, spacing, vertical text, OpenType features, any size | |
 | Warps | All 15 presets, bend, horizontal/vertical distortion, custom and quilt meshes | |
-| Effects | Stroke (solid, gradient, pattern), drop and inner shadow, outer and inner glow, satin, bevel and emboss, color/gradient/pattern overlay | |
+| Effects | Stroke (solid, gradient, pattern), drop and inner shadow, outer and inner glow, satin, bevel and emboss (contours, textures), color/gradient/pattern overlay | |
 | Fonts | PostScript name lookup, closest-style substitution, synthetic bold/italic, `--font-map` | |
 | Output | PNG, JPEG, WebP, TIFF, AVIF, PSD/PSB | |
 

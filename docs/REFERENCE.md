@@ -43,12 +43,12 @@ files are committed here.
 | psd-tools `tests/psd_files` | 270 / 274 (98.5%) |
 | ag-psd `test` | 74 / 76 (97.4%) |
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
-| PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
+| PhotoshopAPI, psd_sdk, psd.js | 76 / 76 |
 | Krita `plugins/impex/psd/tests/data` | 20 / 20 |
 | Aspose.PSD `Examples/Data/PSD` | 192 / 197 (97.5%) |
 | oov/psd `testdata` | 22 / 22 |
 | Artal `tests/cases` | 4 / 4 |
-| All | 721 / 734 (98.2%) |
+| All | 722 / 734 (98.4%) |
 
 ### Misses
 
@@ -59,7 +59,6 @@ files are committed here.
 | `fill_adjustments.psd` (also in webtoon/psd as `fillAdjustments.psd`) | Eleven adjustment layers in a row. Photoshop's last two steps (Color Balance, then a Photo Filter with a Lab color) together act almost like one linear color map, but our models of the chain still miss it (mean 13.0). |
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
-| PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.03, 2.5% of pixels). |
 | Aspose `artboard2.psd` | Dissolve groups, as above. |
 | Aspose `StrokeNoise.psd` | A noise gradient, as above. |
 | Aspose `White 3D Text Effect.psd` | Hundreds of stacked extrusion layers with bevels and satins: the noise and faces match, but everything comes out about 2.5 levels brighter through the Brightness/Contrast, Color Balance, Vibrance and Curves stack (mean 4.0, 0.8% of pixels). |
@@ -98,7 +97,9 @@ Measured against the stored composites:
   inner bevel of the layer with its first stroke, painted only on the stroke. The gloss contour
   maps the lit shade before it is split into highlight and shadow around the flat level. Soften
   blurs the highlight and shadow, not the height, so it fades a steep bevel's shading at the
-  shape's edge (White 3D Text Effect's extrude undersides).
+  shape's edge (White 3D Text Effect's extrude undersides). A texture adds the pattern's
+  luminance to the height (light is high, Invert flips it), scaled by the texture depth but not
+  by the bevel's; its strength comes from the one sample file (smart_object_file_no_warp).
 - **Strokes on shape layers** follow the stored pixels, with Photoshop's own anti-aliasing (on a
   45° edge it is sharper than exact area coverage); they follow the path only where the pixels lost
   the shape.
@@ -145,7 +146,9 @@ Measured against the stored composites:
   reference test divides the inks by alpha before converting.
 - **Color Lookup** CUBE tables name their loops outer to inner: `bgrOrder` runs red fastest,
   `rgbOrder` blue fastest.
-- **Patterns** shrunk below their size average the texels each pixel covers rather than sample one.
+- **Patterns** shrunk below their size average the texels each pixel covers rather than sample one. They
+  also sit a quarter pixel further along both axes than enlarged ones (fit to a 7% overlay in
+  PhotoshopAPI's smart_object_file_no_warp and an 81% one in ag-psd's pattern test).
 - **Text** blends with gamma 1.53 (Photoshop's "Blend Text Colors Using Gamma"): coverage mixes
   `B^γ` and `S^γ`, so antialiased edges look heavier than a plain alpha blend.
 - **Effect blend modes** may be stored with long names (`colorBurn`, `softLight`...) in recent files.
