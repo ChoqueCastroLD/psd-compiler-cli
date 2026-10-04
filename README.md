@@ -217,7 +217,21 @@ git clone https://github.com/Agamnentzar/ag-psd
 PSDC_REFERENCE_DIR=psd-tools/tests/psd_files:ag-psd cargo test --release --test reference -- --nocapture
 ```
 
-Some misses are out of reach by design: Dissolve and noise gradients use Photoshop's random generator. [docs/REFERENCE.md](docs/REFERENCE.md) lists every miss and the models calibrated against the suite.
+[docs/REFERENCE.md](docs/REFERENCE.md) lists every miss and the models calibrated against the suite.
+
+### Known limitations
+
+The 12 files that miss fall into three groups:
+
+- **Photoshop's random generators (6 files).** Dissolve uses a noise pattern that appears to change per Photoshop session, so ours has the same density but different dots. Noise gradients store a seed and a roughness, but how Photoshop turns them into colors is not public; `psdc` draws a smooth ramp between the gradient's color limits instead.
+- **Color adjustments stacked with extreme or out-of-gamut settings (5 files).** Color Balance with Preserve Luminosity, Photo Filter with a Lab color far outside RGB, and long Brightness/Contrast → Color Balance → Vibrance → Curves stacks land within a few levels of Photoshop (mean 2.1–4.0), but not within 2. `fill_adjustments.psd` (mean 13) chains Color Balance into an out-of-gamut Lab Photo Filter, which no model we have tried reproduces. Pinning these down needs grids of settings rendered by Photoshop itself; the test files hold too few distinct colors.
+- **Files written by other tools (1 file).** `cactus_top.psd` stores a merged image whose first column is opaque black, which its layers don't have.
+
+Other things to know:
+
+- Text needs the document's fonts. Missing faces are substituted with a warning, and the layout then follows the substitute's metrics.
+- A few features are covered by only a handful of reference files: satin (4), inner glow (5), blend-if (2), knockout, channel restrictions and duotone (1 each). They match those files but are less tested than the rest.
+- Smart filters cover the common blur, sharpen, other and color filters; noise, distort and Camera Raw filters and smart filter masks are not rendered.
 
 ## Performance
 
