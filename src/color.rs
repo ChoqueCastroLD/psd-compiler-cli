@@ -299,6 +299,16 @@ pub(crate) fn duotone(color_data: &[u8], preview: Option<&[u8]>) -> Vec<[u8; 3]>
 
 /// CIE L*a*b* (D50, L in 0..=100) to sRGB in 0..=1.
 pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> [f32; 3] {
+    lab_to_linear(l, a, b).map(|v| srgb_encode(v) as f32)
+}
+
+/// [`lab_to_rgb`] without clipping to the gamut: channels outside 0..=1 keep going, encoded
+/// symmetrically about zero.
+pub(crate) fn lab_to_rgb_unclipped(l: f64, a: f64, b: f64) -> [f32; 3] {
+    lab_to_linear(l, a, b).map(|v| (v.signum() * srgb_encode_unclipped(v.abs())) as f32)
+}
+
+fn lab_to_linear(l: f64, a: f64, b: f64) -> [f64; 3] {
     let fy = (l + 16.0) / 116.0;
     let fx = fy + a / 500.0;
     let fz = fy - b / 200.0;
@@ -309,7 +319,7 @@ pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> [f32; 3] {
         -0.9787684 * x + 1.9161415 * y + 0.0334540 * z,
         0.0719453 * x - 0.2289914 * y + 1.4052427 * z,
     ];
-    lin.map(|v| srgb_encode(v) as f32)
+    lin
 }
 
 /// sRGB in 0..=1 to CIE L*a*b* (D50); the inverse of [`lab_to_rgb`].
@@ -384,7 +394,10 @@ pub(crate) fn srgb_decode(v: f64) -> f64 {
 
 /// The sRGB transfer curve: linear light to encoded, in 0..=1.
 pub(crate) fn srgb_encode(v: f64) -> f64 {
-    let v = v.clamp(0.0, 1.0);
+    srgb_encode_unclipped(v.clamp(0.0, 1.0))
+}
+
+fn srgb_encode_unclipped(v: f64) -> f64 {
     if v <= 0.0031308 {
         12.92 * v
     } else {

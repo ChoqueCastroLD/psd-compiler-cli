@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Color lookup tables read in the order the layer names; color balance midtones as a per-channel gamma, shadows and highlights with fitted weights.
 - Vibrance as Photoshop runs it: chroma scaled about the luminance in linear light, less for saturated colors.
 - Selective color ranges move each channel within its room, relative to its ink or absolute.
+- Photo filters at half their density, with Lab colors outside RGB kept unclipped.
 - Bevel gloss contours; interior effects of faded Normal layers in other modes blend onto the backdrop.
 - Smooth gradient tangents over the stop index, for unevenly spaced stops.
 - Outer glows hidden under layers with a faded fill.

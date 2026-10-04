@@ -555,6 +555,11 @@ fn channel_mixer(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
 
 /// A Photoshop color record: a color space id and four 16-bit components.
 fn color_record(r: &mut Reader, cs: &ColorSpace) -> Option<[f32; 3]> {
+    color_record_in(r, cs, false)
+}
+
+/// A color record; with `unclipped`, Lab colors outside RGB keep their out-of-range channels.
+fn color_record_in(r: &mut Reader, cs: &ColorSpace, unclipped: bool) -> Option<[f32; 3]> {
     let space = r.u16().ok()?;
     let raw: Vec<u16> = (0..4).map(|_| r.u16()).collect::<Result<_, _>>().ok()?;
     let v = raw.iter().map(|&x| x as f64 / 65535.0).collect::<Vec<_>>();
@@ -562,7 +567,14 @@ fn color_record(r: &mut Reader, cs: &ColorSpace) -> Option<[f32; 3]> {
         1 => color::hsb_to_rgb(v[0], v[1], v[2]).map(|x| x as f32),
         2 => cs.cmyk(1.0 - v[0], 1.0 - v[1], 1.0 - v[2], 1.0 - v[3]),
         // L in hundredths, a and b in signed hundredths.
-        7 => color::lab_to_rgb(raw[0] as f64 / 100.0, raw[1] as i16 as f64 / 100.0, raw[2] as i16 as f64 / 100.0),
+        7 => {
+            let lab = (raw[0] as f64 / 100.0, raw[1] as i16 as f64 / 100.0, raw[2] as i16 as f64 / 100.0);
+            if unclipped {
+                color::lab_to_rgb_unclipped(lab.0, lab.1, lab.2)
+            } else {
+                color::lab_to_rgb(lab.0, lab.1, lab.2)
+            }
+        }
         // Gray as ink coverage in hundredths of a percent.
         8 => [1.0 - (raw[0] as f32 / 10000.0).min(1.0); 3],
         _ => [v[0] as f32, v[1] as f32, v[2] as f32],
@@ -610,11 +622,13 @@ fn photo_filter(r: &mut Reader, cs: &ColorSpace) -> Option<ColorFn> {
         let z = r.i32().ok()? as f64 / 100.0;
         let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
         let (fx, fy, fz) = (f(x / 96.422), f(y / 100.0), f(z / 82.521));
-        color::lab_to_rgb(116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+        color::lab_to_rgb_unclipped(116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
     } else {
-        color_record(r, cs)?
+        color_record_in(r, cs, true)?
     };
-    let density = r.u32().ok()? as f32 / 100.0;
+    // A color outside RGB acts with its out-of-range channels, and the density counts half (fit
+    // to Photoshop's PhotoFilterAdjustmentLayer and AllAdjustments, Lab colors at 100% and 25%).
+    let density = r.u32().ok()? as f32 / 200.0;
     let preserve = r.u8().unwrap_or(1) != 0;
     Some(Box::new(move |c| {
         let m = [0, 1, 2].map(|i| c[i] + (c[i] * filter[i] - c[i]) * density);
@@ -771,6 +785,19 @@ mod tests {
         }
         let o = f([0.6; 3]);
         assert!(o[2] > o[1] && o[0] < o[1] + 0.01, "{o:?}");
+    }
+
+    #[test]
+    fn photo_filter_keeps_colors_outside_rgb_at_half_density() {
+        // Photoshop's PhotoFilterAdjustmentLayer: Lab (88, -79, -118) at 100%, luminosity not kept.
+        let mut data = vec![0, 2, 0, 7];
+        for v in [8800i16, -7900, -11800, 0] {
+            data.extend(v.to_be_bytes());
+        }
+        data.extend(100u32.to_be_bytes());
+        data.push(0);
+        let o = photo_filter(&mut Reader::new(&data), &ColorSpace::default()).unwrap()([0.5; 3]);
+        assert!(o[0] < 0.0 && (o[1] - 0.51).abs() < 0.01 && (o[2] - 0.69).abs() < 0.01, "{o:?}");
     }
 
     #[test]
