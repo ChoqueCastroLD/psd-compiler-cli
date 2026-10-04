@@ -97,6 +97,7 @@ pub(crate) struct Bevel {
     pub altitude: f64,
     pub highlight: ([f32; 3], f32, BlendMode),
     pub shadow: ([f32; 3], f32, BlendMode),
+    pub gloss: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -386,6 +387,7 @@ pub(crate) fn parse(fx: &Descriptor, doc: &Document, cs: &ColorSpace) -> Effects
                 (d.num("sdwO").unwrap_or(75.0) / 100.0) as f32,
                 BlendMode::from_key(d.enumerated("sdwM").unwrap_or("Mltp").as_bytes()),
             ),
+            gloss: contour(d),
         })
         .collect();
     e
@@ -881,6 +883,8 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
             let n = [-gx, -gy, 1.0];
             let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
             let shade = (n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / len;
+            // The gloss contour reshapes the lit shade, not the flat level it is measured from.
+            let shade = shaped(&b.gloss, shade);
             if shade > flat {
                 hi[i] = ((shade - flat) / (1.0 - flat).max(1e-3)).min(1.0);
             } else {
@@ -1160,6 +1164,7 @@ mod tests {
             altitude: 30.0,
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+            gloss: None,
         };
         let e = Effects { bevels: vec![b], ..Default::default() };
         let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
@@ -1167,6 +1172,35 @@ mod tests {
         assert!(hi[15 * w + 6] > 0.3 && lo[15 * w + 6] == 0.0);
         assert!(lo[15 * w + 23] > 0.3 && hi[15 * w + 23] == 0.0);
         assert_eq!(hi[15 * w + 15], 0.0);
+    }
+
+    #[test]
+    fn gloss_contour_reshapes_the_shade() {
+        let (w, h) = (30, 30);
+        let a = square(w, h, 5, 25);
+        let mut b = Bevel {
+            style: BevelStyle::Inner,
+            smooth: false,
+            depth: 1.0,
+            up: true,
+            size: 5.0,
+            soften: 0.0,
+            angle: 135.0,
+            altitude: 30.0,
+            highlight: ([1.0; 3], 1.0, BlendMode::Screen),
+            shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+            gloss: None,
+        };
+        let lit = |b: &Bevel| {
+            let e = Effects { bevels: vec![b.clone()], ..Default::default() };
+            let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
+            (p.inner[1].cov[15 * w + 6], p.inner[0].cov[15 * w + 6])
+        };
+        assert!(lit(&b).0 > 0.3);
+        // An inverted contour turns the lit side's bright shade dark.
+        b.gloss = Some((0..256).map(|i| 1.0 - i as f32 / 255.0).collect());
+        let (hi, lo) = lit(&b);
+        assert!(hi == 0.0 && lo > 0.3, "{hi} {lo}");
     }
 
     #[test]
@@ -1184,6 +1218,7 @@ mod tests {
             altitude: 30.0,
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+            gloss: None,
         };
         let e = Effects { bevels: vec![b], ..Default::default() };
         let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
@@ -1209,6 +1244,7 @@ mod tests {
             altitude: 30.0,
             highlight: ([1.0; 3], 1.0, BlendMode::Screen),
             shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+            gloss: None,
         };
         let stroke = Stroke {
             fill: Fill::Solid([0.0; 3]),

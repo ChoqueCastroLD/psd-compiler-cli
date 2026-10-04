@@ -756,12 +756,13 @@ impl Compositor<'_> {
         }
         // Photoshop blends a layer's interior effects onto the result of the layer over its
         // backdrop, within its shape: the same as blending them into the layer in Normal mode, not
-        // in the others.
+        // in the others, nor for a faded Normal layer whose effects use a non-normal mode.
         let on_top = !interior_grouped
             && plain.is_none()
             && knockout(l) == 0
             && !l.blend_if
-            && !matches!(mode, BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough)
+            && (!matches!(mode, BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough)
+                || (mode == BlendMode::Normal && f < 1.0 && s.prepared.inner.iter().any(|e| !e.mode.is_normal())))
             && !s.prepared.inner.is_empty()
             && s.prepared.inner.iter().all(|e| e.paint == effects::Paint::Over);
         if on_top {

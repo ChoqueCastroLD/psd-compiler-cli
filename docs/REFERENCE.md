@@ -13,7 +13,7 @@ PSDC_REFERENCE_DIR=dir1:dir2 cargo test --release --test reference -- --nocaptur
 `PSDC_REFERENCE_MIN` (default `0.95`) is the match rate below which the test fails. Files without a
 stored composite, without layers, or whose stored composite is an all-black placeholder (no version
 info block, as in the contents of some smart objects) are skipped. Files whose stored composite is a
-single color (121 of the 736, e.g. an adjustment over an empty canvas) count toward the total but not
+single color (121 of the 734, e.g. an adjustment over an empty canvas) count toward the total but not
 toward the feature rates, since they cannot show whether a feature renders right.
 
 Some features are only covered by files that combine many of them: Photo Filter, Selective Color,
@@ -31,7 +31,8 @@ CI runs it on the test files of [psd-tools](https://github.com/psd-tools/psd-too
 carry no Photoshop composite, and neither are webtoon/psd's deliberately broken files or the Aspose
 examples written back by Aspose (names with Changed, Added, Edited, Merged, Flattened or `_out`,
 plus `CropTest.psd`, whose composite carries Aspose's evaluation watermark, and
-`ImageWithTextLayer.psd`, whose text layer Aspose wrote), nor oov/psd's files saved by other
+`ImageWithTextLayer.psd`, whose text layer Aspose wrote, and `HasFont.psd` with its copy
+`asposeImage02.psd`, whose composite text is set differently from their own text layers), nor oov/psd's files saved by other
 painting apps (no Photoshop version info). None of the
 files are committed here.
 
@@ -44,10 +45,10 @@ files are committed here.
 | webtoon/psd, psd.rb, chinedufn/psd | 64 / 65 (98.5%) |
 | PhotoshopAPI, psd_sdk, psd.js | 75 / 76 (98.7%) |
 | Krita `plugins/impex/psd/tests/data` | 20 / 20 |
-| Aspose.PSD `Examples/Data/PSD` | 191 / 199 (96.0%) |
+| Aspose.PSD `Examples/Data/PSD` | 191 / 197 (97.0%) |
 | oov/psd `testdata` | 22 / 22 |
 | Artal `tests/cases` | 4 / 4 |
-| All | 719 / 736 (97.7%) |
+| All | 719 / 734 (98.0%) |
 
 ### Misses
 
@@ -62,7 +63,7 @@ files are committed here.
 | PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.07, 2.5% of pixels). |
 | Aspose `artboard2.psd` | Dissolve groups, as above. |
 | Aspose `StrokeNoise.psd` | A noise gradient, as above. |
-| Aspose `HasFont.psd`, `asposeImage02.psd`, `White 3D Text Effect.psd` | Fonts that are not installed (Stencil, Tw Cen MT). |
+| Aspose `White 3D Text Effect.psd` | Stacked extrusion layers under a Color Balance with shadows and highlights set (see Mixer below): the gray faces come out tinted and the undersides darker (mean 7.7, 3% of pixels). |
 | Aspose `ColorBalance.psd` | Its composite predates the last edit (it shows none of the layer's balance). |
 | Aspose `PhotoFilterAdjustmentLayer.psd` | A Photo Filter with a Lab color (88, −79, −118) far outside RGB; no conversion we tried explains Photoshop's result. |
 | Aspose `Mixer_ipad_Hand_W_crash.psd` | Color Balance with shadows, midtones and highlights set and luminosity preserved (mean 4.2): only midtones are calibrated. |
@@ -96,14 +97,16 @@ Measured against the stored composites:
 - **Bevels**: smooth bevels are lit from the blurred shape; Smooth Emboss and Pillow Emboss blur over
   half their size with 0.6 of the lift, and a pillow is lit per side of its fold. Chisel bevels
   (hard and soft) rise 0.35 of their depth, so their sides barely shade. A stroke emboss is an
-  inner bevel of the layer with its first stroke, painted only on the stroke.
+  inner bevel of the layer with its first stroke, painted only on the stroke. The gloss contour
+  maps the lit shade before it is split into highlight and shadow around the flat level.
 - **Neutral-color modes** (Color/Linear Dodge, Burn, Difference, Vivid/Linear Light...): effects and
   fill opacity fade the color toward the mode's neutral color rather than lowering alpha. Over a
   transparent backdrop the layer shows plainly at its fill opacity; over a covered one the faded
   color blends at full strength.
 - **Interior effects over blend modes**: overlays, inner shadows and glows, satin and inner bevels
   are blended onto the layer after it was blended with the backdrop, inside its shape, rather than
-  onto the layer alone.
+  onto the layer alone. The same holds for a Normal layer with fill below 100% whose interior
+  effects use another mode (a fill-0 layer with a Color Dodge bevel lightens the backdrop).
 - **Brightness/Contrast** (non-legacy): brightness first, then contrast. Brightness moves each
   level `b` steps along a fixed field (so +b and −b undo each other and keep black and white);
   contrast is a spline through (55, 55 − 0.27c) and (200, 200 + 0.27c), pivoting on middle gray.
