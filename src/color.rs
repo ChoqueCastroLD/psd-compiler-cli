@@ -314,12 +314,11 @@ fn lab_to_linear(l: f64, a: f64, b: f64) -> [f64; 3] {
     let fz = fy - b / 200.0;
     let inv = |t: f64| if t > 6.0 / 29.0 { t * t * t } else { 3.0 * (6.0f64 / 29.0).powi(2) * (t - 4.0 / 29.0) };
     let (x, y, z) = (0.96422 * inv(fx), inv(fy), 0.82521 * inv(fz));
-    let lin = [
+    [
         3.1338561 * x - 1.6168667 * y - 0.4906146 * z,
         -0.9787684 * x + 1.9161415 * y + 0.0334540 * z,
         0.0719453 * x - 0.2289914 * y + 1.4052427 * z,
-    ];
-    lin
+    ]
 }
 
 /// sRGB in 0..=1 to CIE L*a*b* (D50); the inverse of [`lab_to_rgb`].
