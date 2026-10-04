@@ -65,7 +65,7 @@ files are committed here.
 | Aspose `StrokeNoise.psd` | A noise gradient, as above. |
 | Aspose `White 3D Text Effect.psd` | Hundreds of stacked extrusion layers with bevels and satins: the shaded undersides come out darker than Photoshop's (mean 4.8, 2.5% of pixels). |
 | Aspose `ColorBalance.psd` | Extreme sliders on a 10×10 swatch: Photoshop's red patch keeps less than its HSL lightness under Preserve Luminosity (mean 2.11, just over the limit). |
-| Aspose `PhotoFilterAdjustmentLayer.psd` | A Photo Filter with a Lab color (88, −79, −118) far outside RGB; no conversion we tried explains Photoshop's result. |
+| Aspose `PhotoFilterAdjustmentLayer.psd` | A Photo Filter with a Lab color (88, −79, −118) far outside RGB. Multiplying in linear light by (≤ 0, 1.11, 2.27) and restoring the luminosity matches (mean 0.8); the unclamped sRGB conversion gives (−1.28, 1.09, 3.67), and no gamut mapping or clip we tried lands on that blue. |
 
 ## Calibrated models
 
