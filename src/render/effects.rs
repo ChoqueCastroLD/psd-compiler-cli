@@ -482,7 +482,8 @@ impl Effects {
     /// `fill` is the layer's fill opacity (for shadows the layer knocks out) and `bounds` the box
     /// gradients and patterns are laid out on.
     /// Builds the effect layers for coverage `a` over `rect`. Outside strokes show under
-    /// translucent pixels, except on shape layers, whose strokes follow their `path` coverage.
+    /// translucent pixels, except on shape layers whose pixels lost the shape: their strokes
+    /// follow its `path` coverage.
     pub fn prepare(
         &self,
         doc: &Document,
@@ -681,7 +682,7 @@ impl Effects {
             let tint = fill_tint_in(&s.fill, [b[0] - o, b[1] - o, b[2] + o, b[3] + o]);
             if inner_r > 0.0 {
                 let band = band(&inward, inner_r);
-                // On shapes the stroke follows the path, also where the fill is transparent.
+                // On stale shapes the stroke follows the path, also where the fill is transparent.
                 if let Some(v) = path {
                     let cov = band.iter().zip(v).zip(a).map(|((&c, &p), &q)| c * (p - q).max(0.0)).collect();
                     p.beside.push(Layered {

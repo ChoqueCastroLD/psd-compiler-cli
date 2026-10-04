@@ -384,8 +384,10 @@ pub(crate) fn coverage(content: &Raster, mask: &Region) -> Vec<f32> {
     a
 }
 
-/// A shape layer's vector coverage over `content`, times its mask: what its strokes follow.
-fn path_coverage(doc: &Document, l: &Layer, content: &Raster, mask: &Region) -> Option<Vec<f32>> {
+/// A shape layer's vector coverage over `content`, times its mask: what its strokes follow when
+/// the stored pixels lost the shape. Pixels that still hold it (`coverage` within half a pixel's
+/// coverage of the path everywhere) keep Photoshop's own anti-aliasing, which the strokes follow.
+fn path_coverage(doc: &Document, l: &Layer, content: &Raster, mask: &Region, coverage: &[f32]) -> Option<Vec<f32>> {
     let vm = l.block(b"vmsk").or(l.block(b"vsms")).and_then(|b| vector::parse(b, doc.width, doc.height))?;
     if vm.disabled {
         return None;
@@ -395,7 +397,8 @@ fn path_coverage(doc: &Document, l: &Layer, content: &Raster, mask: &Region) -> 
         let m = mask.grid(content.x, content.y, content.w, content.h);
         v.iter_mut().zip(&m).for_each(|(a, k)| *a *= k);
     }
-    Some(v)
+    let stale = v.iter().zip(coverage).any(|(p, q)| (p - q).abs() > 0.5);
+    stale.then_some(v)
 }
 
 /// Renders leaf layer `index`.
@@ -456,7 +459,9 @@ pub(crate) fn render_layer(ctx: &Ctx, index: usize) -> LayerOutput {
         let bounds = (path_box.unwrap_or(pixel_box), pixel_box);
         let fill = l.fill_opacity as f32 / 255.0;
         let rect = (content.x, content.y, content.w, content.h);
-        let path = (!out.effects.strokes.is_empty()).then(|| path_coverage(doc, l, &content, &out.mask)).flatten();
+        let path = (!out.effects.strokes.is_empty())
+            .then(|| path_coverage(doc, l, &content, &out.mask, &out.coverage))
+            .flatten();
         out.prepared = out.effects.prepare(doc, cs, &out.coverage, path.as_deref(), rect, fill, bounds);
     }
     out.text_mask = (is_text && ctx.options.text_masks).then(|| TextMask {
