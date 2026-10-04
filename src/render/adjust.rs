@@ -394,6 +394,21 @@ fn range_weight(h: f32, r: &[f32; 4]) -> f32 {
     }
 }
 
+// Color Balance shadow and highlight weights at nine evenly spaced levels, by the slider's sign
+// (fit to Photoshop's Mixer_ipad_Hand_W_crash, ColorBalance and White 3D Text Effect): raising
+// the shadows peaks in the darker midtones, lowering them fades out from black; raising the
+// highlights grows toward white, lowering them barely acts. Each reaches across most of the range.
+const SHADOW_ADD: [f32; 9] = [0.00, 0.12, 0.24, 0.27, 0.22, 0.16, 0.10, 0.05, 0.00];
+const SHADOW_SUB: [f32; 9] = [0.30, 0.23, 0.17, 0.15, 0.13, 0.04, 0.00, 0.01, 0.00];
+const HIGHLIGHT_ADD: [f32; 9] = [0.00, 0.07, 0.13, 0.18, 0.22, 0.26, 0.30, 0.33, 0.37];
+const HIGHLIGHT_SUB: [f32; 9] = [0.00, 0.01, 0.00, 0.03, 0.09, 0.05, 0.03, 0.01, 0.00];
+
+fn knots(t: &[f32; 9], x: f32) -> f32 {
+    let p = x.clamp(0.0, 1.0) * 8.0;
+    let i = (p as usize).min(7);
+    t[i] + (t[i + 1] - t[i]) * (p - i as f32)
+}
+
 fn color_balance(r: &mut Reader) -> Option<ColorFn> {
     let mut v = [[0f32; 3]; 3];
     for range in &mut v {
@@ -405,11 +420,12 @@ fn color_balance(r: &mut Reader) -> Option<ColorFn> {
     Some(Box::new(move |c| {
         let mut o = [0f32; 3];
         for ch in 0..3 {
-            // Midtones bend each channel by a gamma of 2^-m (fit to Photoshop's AllAdjustments).
+            // Midtones bend each channel by a gamma of 2^-m (fit to Photoshop's AllAdjustments);
+            // shadows and highlights then shift it by the weights above.
             let x = c[ch].clamp(0.0, 1.0).powf((-v[1][ch]).exp2());
-            let shadows = ((0.333 - x) / 0.25 + 0.5).clamp(0.0, 1.0) * 0.7;
-            let highs = ((x - 0.667) / 0.25 + 0.5).clamp(0.0, 1.0) * 0.7;
-            o[ch] = (x + v[0][ch] * shadows + v[2][ch] * highs).clamp(0.0, 1.0);
+            let s = if v[0][ch] > 0.0 { &SHADOW_ADD } else { &SHADOW_SUB };
+            let h = if v[2][ch] > 0.0 { &HIGHLIGHT_ADD } else { &HIGHLIGHT_SUB };
+            o[ch] = (x + v[0][ch] * knots(s, x) + v[2][ch] * knots(h, x)).clamp(0.0, 1.0);
         }
         if preserve {
             let hsl = rgb_to_hsl(o);
@@ -740,6 +756,21 @@ mod tests {
         data.push(0);
         let o = color_balance(&mut Reader::new(&data)).unwrap()([0.5; 3]);
         assert!((o[0] - 0.25).abs() < 1e-4 && o[1] == 0.5 && o[2] == 0.5, "{o:?}");
+    }
+
+    #[test]
+    fn color_balance_keeps_pure_colors_and_tints_grays() {
+        // Photoshop's ColorBalance.psd: midtones (-100, 0, 89), highlights (-70, -100, 99).
+        let b: [i16; 9] = [0, 0, 0, -100, 0, 89, -70, -100, 99];
+        let mut data: Vec<u8> = b.iter().flat_map(|x| x.to_be_bytes()).collect();
+        data.push(1);
+        let f = color_balance(&mut Reader::new(&data)).unwrap();
+        for c in [[1.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]] {
+            let o = f(c);
+            assert!(o.iter().zip(c).all(|(a, b)| (a - b).abs() < 0.01), "{c:?} {o:?}");
+        }
+        let o = f([0.6; 3]);
+        assert!(o[2] > o[1] && o[0] < o[1] + 0.01, "{o:?}");
     }
 
     #[test]
