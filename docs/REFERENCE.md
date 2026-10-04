@@ -60,10 +60,10 @@ files are committed here.
 | `effects/shape-fx2.psd` | Effect edges off by about a tenth of a pixel along a 45° edge, on a 32×32 canvas (4% of pixels). |
 | `third-party-psds/cactus_top.psd` | Written by a third-party tool. |
 | ag-psd `read/effects`, `read-write/effects` | A noise gradient, as above. |
-| PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.07, 2.5% of pixels). |
+| PhotoshopAPI `smart_object_file_no_warp.psd` | A pillow emboss with a texture over a pattern overlay shrunk to 7%: the texture's fine detail differs from Photoshop's (mean 1.03, 2.5% of pixels). |
 | Aspose `artboard2.psd` | Dissolve groups, as above. |
 | Aspose `StrokeNoise.psd` | A noise gradient, as above. |
-| Aspose `White 3D Text Effect.psd` | Hundreds of stacked extrusion layers with bevels and satins: the shaded undersides come out darker than Photoshop's (mean 4.8, 2.5% of pixels). |
+| Aspose `White 3D Text Effect.psd` | Hundreds of stacked extrusion layers with bevels and satins: the noise and faces match, but everything comes out about 2.5 levels brighter through the Brightness/Contrast, Color Balance, Vibrance and Curves stack (mean 4.0, 0.8% of pixels). |
 | Aspose `ColorBalance.psd` | Extreme sliders on a 10×10 swatch: Photoshop's red patch keeps less than its HSL lightness under Preserve Luminosity (mean 2.11, just over the limit). |
 | Aspose `PhotoFilterAdjustmentLayer.psd` | A Photo Filter with a Lab color (88, −79, −118) far outside RGB (mean 4.0, 0.01% of pixels): the model below lands close but not within 2. |
 
@@ -97,7 +97,9 @@ Measured against the stored composites:
   half their size with 0.6 of the lift, and a pillow is lit per side of its fold. Chisel bevels
   (hard and soft) rise 0.35 of their depth, so their sides barely shade. A stroke emboss is an
   inner bevel of the layer with its first stroke, painted only on the stroke. The gloss contour
-  maps the lit shade before it is split into highlight and shadow around the flat level.
+  maps the lit shade before it is split into highlight and shadow around the flat level. Soften
+  blurs the highlight and shadow, not the height, so it fades a steep bevel's shading at the
+  shape's edge (White 3D Text Effect's extrude undersides).
 - **Neutral-color modes** (Color/Linear Dodge, Burn, Difference, Vivid/Linear Light...): effects and
   fill opacity fade the color toward the mode's neutral color rather than lowering alpha. Over a
   transparent backdrop the layer shows plainly at its fill opacity; over a covered one the faded

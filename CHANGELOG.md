@@ -24,6 +24,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Writing CMYK, Lab, duotone, indexed and 32-bit documents.
 - Reference test against the composites Photoshop stored in real files, with a match rate per feature (`PSDC_REFERENCE_DIR`); CI runs it on the test files of psd-tools, ag-psd, webtoon/psd, psd.rb, chinedufn/psd, PhotoshopAPI, psd_sdk, psd.js, Krita, Aspose.PSD, oov/psd and Artal (720/734 match; see docs/REFERENCE.md).
 - Stroke emboss bevels.
+- Bevel soften blurs the highlight and shadow rather than the height.
 - Non-legacy brightness/contrast as Photoshop runs it: brightness, then contrast.
 - Color lookup tables read in the order the layer names; color balance midtones as a per-channel gamma, shadows and highlights with fitted weights.
 - Vibrance as Photoshop runs it: chroma scaled about the luminance in linear light, less for saturated colors.

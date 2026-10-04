@@ -826,7 +826,7 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
     // A smooth pillow folds the blurred shape at the edge level; each side is lit by its own slope.
     let mut fold = None;
     let halves = matches!(b.style, BevelStyle::Pillow | BevelStyle::Emboss);
-    let mut height = if b.smooth {
+    let height = if b.smooth {
         // Smooth bevels are lit from the blurred shape; an emboss or pillow, half inside and half
         // outside, blurs over half its size.
         let mut g = a.to_vec();
@@ -855,13 +855,6 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
             }
         }
     };
-    if b.soften > 0.0 {
-        // Blurs treat the raster's surroundings as 0, so blur relative to the height far outside.
-        let far = if b.style == BevelStyle::Pillow { 1.0 } else { 0.0 };
-        height.iter_mut().for_each(|v| *v -= far);
-        blur(&mut height, w, h, b.soften * SIGMA_PER_SIZE, b.soften);
-        height.iter_mut().for_each(|v| *v += far);
-    }
     let lift = (b.depth * size as f64).max(0.01) as f32 * if b.up { 1.0 } else { -1.0 };
     // A smooth emboss or pillow rises 0.6 of its depth (a pillow on either side of the fold).
     let lift = if b.smooth && halves { lift * 0.6 } else { lift };
@@ -891,6 +884,12 @@ fn bevel_light(b: &Bevel, d: &Distances, a: &[f32], w: usize, h: usize) -> (Vec<
                 lo[i] = ((flat - shade) / flat.max(1e-3)).min(1.0);
             }
         }
+    }
+    // Soften blurs the light, not the height: a blurred height keeps a steep bevel saturated,
+    // while Photoshop spreads and fades its shading (White 3D's extrude undersides).
+    if b.soften > 0.0 {
+        blur(&mut hi, w, h, b.soften * SIGMA_PER_SIZE, b.soften);
+        blur(&mut lo, w, h, b.soften * SIGMA_PER_SIZE, b.soften);
     }
     (hi, lo)
 }
@@ -1201,6 +1200,36 @@ mod tests {
         b.gloss = Some((0..256).map(|i| 1.0 - i as f32 / 255.0).collect());
         let (hi, lo) = lit(&b);
         assert!(hi == 0.0 && lo > 0.3, "{hi} {lo}");
+    }
+
+    #[test]
+    fn soften_spreads_and_fades_the_light() {
+        let (w, h) = (40, 40);
+        let a = square(w, h, 10, 30);
+        let mut b = Bevel {
+            style: BevelStyle::Inner,
+            smooth: true,
+            depth: 2.2,
+            up: true,
+            size: 3.0,
+            soften: 0.0,
+            angle: 90.0,
+            altitude: 30.0,
+            highlight: ([1.0; 3], 1.0, BlendMode::Screen),
+            shadow: ([0.0; 3], 1.0, BlendMode::Multiply),
+            gloss: None,
+        };
+        let shade = |b: &Bevel, y: usize| {
+            let e = Effects { bevels: vec![b.clone()], ..Default::default() };
+            let p = e.prepare(&doc(), &ColorSpace::default(), &a, None, (0, 0, w, h), 1.0, ([0.0; 4], [0.0; 4]));
+            p.inner[0].cov[y * w + 20]
+        };
+        // The bottom edge faces away from the light: a steep bevel shades it fully...
+        assert!(shade(&b, 29) > 0.9);
+        // ...and soften blurs that shade over the outside, halving it at the edge and reaching inward.
+        b.soften = 7.0;
+        let (edge, inside) = (shade(&b, 29), shade(&b, 24));
+        assert!(edge > 0.3 && edge < 0.7 && inside > 0.05, "{edge} {inside}");
     }
 
     #[test]
