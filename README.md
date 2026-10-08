@@ -135,8 +135,10 @@ The full reference is in [docs/CLI.md](docs/CLI.md).
 
 ```toml
 [dependencies]
-psd-compiler = { git = "https://github.com/ChoqueCastroLD/psd-compiler-cli" }
+psd-compiler = { git = "https://github.com/ChoqueCastroLD/psd-compiler-cli", default-features = false }
 ```
+
+`default-features = false` leaves out the CLI (`clap`, `mimalloc`); the default `cli` feature builds `psdc`.
 
 ```rust
 use psd_compiler::{render, Document, FontDb, RenderOptions, DEFAULT_COMPRESSION};

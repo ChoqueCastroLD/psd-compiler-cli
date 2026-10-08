@@ -18,15 +18,16 @@ path = "src/lib.rs"
 [[bin]]
 name = "psdc"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 flate2 = "1"
 image-webp = "0.2"
 jpeg-decoder = { version = "0.3", default-features = false }
 jpeg-encoder = "0.6"
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1", default-features = false, optional = true }
 moxcms = "0.8"
 png = "0.17"
 rayon = "1"
@@ -35,7 +36,9 @@ rustybuzz = "0.20"
 tiny-skia = "0.11"
 
 [features]
-default = []
+default = ["cli"]
+# The `psdc` binary. Library users can turn it off: `default-features = false`.
+cli = ["dep:clap", "dep:mimalloc"]
 # AVIF output (pure-Rust rav1e encoder; adds build time).
 avif = ["dep:ravif"]
 
